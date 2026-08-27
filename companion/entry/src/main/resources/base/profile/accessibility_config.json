@@ -1,0 +1,14 @@
+{
+  "accessibilityAbilityTypes": [
+    "generic"
+  ],
+  "accessibilityCapabilities": [
+    "retrieve",
+    "gesture"
+  ],
+  "accessibilityCapabilityRationale": "用于将Mac端键盘和鼠标操作同步到手机",
+  "settingsAbility": "",
+  "isImportant": false,
+  "needHide": false,
+  "accessibilityEventConfigure": []
+}

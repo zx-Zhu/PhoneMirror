@@ -1,0 +1,9 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "PhoneMirror 鸿蒙持续 H.264 采集服务" },
+    { "name": "EntryAbility_desc", "value": "PhoneMirror 鸿蒙持续 H.264 采集服务" },
+    { "name": "EntryAbility_label", "value": "PhoneMirror Companion" },
+    { "name": "Accessibility_label", "value": "PhoneMirror 远程控制" },
+    { "name": "Accessibility_desc", "value": "允许已配对的Mac控制本机触摸和文字输入" }
+  ]
+}
