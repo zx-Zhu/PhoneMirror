@@ -95,6 +95,17 @@ actor HDCClient {
         return info
     }
 
+    func launchSchema(_ schema: String, deviceID: String) async throws {
+        let launch = await execute(deviceID, Self.schemaLaunchArguments(schema), timeout: 15)
+        guard launch.succeeded, !Self.outputIndicatesFailure(launch.combinedOutput) else {
+            throw HDCError.commandFailed("Schema 跳转失败：\(Self.friendlyError(launch))")
+        }
+    }
+
+    static func schemaLaunchArguments(_ schema: String) -> [String] {
+        ["shell", "aa", "start", "-U", SchemaLink.shellQuoted(schema)]
+    }
+
     static func parsePackageInfo(_ data: Data) -> AppPackageInfo? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let app = root["app"] as? [String: Any],

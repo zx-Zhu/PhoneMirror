@@ -11,6 +11,7 @@
 - Android 与 HarmonyOS 支持鼠标点击、拖动、滚轮和键盘输入；iOS 为只读投屏
 - Android 使用 scrcpy 实时触控；HarmonyOS 使用 UiTest RPC 实时发送 DOWN/MOVE/UP，连接失败时自动回退稳定的 click/swipe
 - Android 与 HarmonyOS 支持返回、主页、多任务和电源等快捷操作
+- Android 与 HarmonyOS 支持输入完整 Schema / URL 并跳转到对应应用页面
 - 将 `.apk` 或 `.hap` 拖到对应设备的投屏画面，可覆盖安装并自动启动应用
 - 两种平台均使用手机系统录屏，不依赖投屏画面
 - iOS 使用 QuickTime USB 只读投屏，手机端无需安装 App；仅在用户主动开始投屏时请求一次 macOS 相机权限
@@ -70,6 +71,7 @@ PHONE_MIRROR_HARMONY_TEST_DEVICE=鸿蒙设备ID PHONE_MIRROR_ANDROID_TEST_DEVICE
 | 右键 / Esc（Android / HarmonyOS） | 返回 |
 | 中键（Android / HarmonyOS） | Home |
 | 输入文字（Android / HarmonyOS） | 输入到当前焦点 |
+| 右侧链接按钮（Android / HarmonyOS） | 输入 Schema / URL 并跳转 |
 | 拖入 `.apk`（Android） | 覆盖安装并启动应用 |
 | 拖入 `.hap`（HarmonyOS） | 覆盖安装并启动应用 |
 | 相机按钮 | 将当前画面保存为 PNG 文件并复制到剪贴板 |

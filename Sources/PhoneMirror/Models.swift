@@ -111,6 +111,31 @@ struct AppPackageInfo: Equatable, Sendable {
     let entryPoint: String?
 }
 
+enum SchemaLink {
+    static func normalized(_ input: String) -> String? {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty,
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              let separator = value.firstIndex(of: ":"), separator != value.startIndex else { return nil }
+
+        let scheme = value[..<separator]
+        guard let first = scheme.unicodeScalars.first, CharacterSet.letters.contains(first),
+              scheme.unicodeScalars.dropFirst().allSatisfy({
+                  CharacterSet.alphanumerics.contains($0) || CharacterSet(charactersIn: "+-.").contains($0)
+              }) else { return nil }
+        return value
+    }
+
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+}
+
+enum SchemaLaunchResult: Equatable {
+    case succeeded(String)
+    case failed(String)
+}
+
 enum PackageInstallState: Equatable {
     case idle
     case installing(String)

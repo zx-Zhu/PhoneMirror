@@ -157,6 +157,17 @@ actor ADBClient {
         return info
     }
 
+    func launchSchema(_ schema: String, deviceID: String) async throws {
+        let launch = await execute(deviceID, Self.schemaLaunchArguments(schema), timeout: 15)
+        guard launch.succeeded, !Self.outputIndicatesLaunchFailure(launch.combinedOutput) else {
+            throw ADBError.commandFailed("Schema 跳转失败：\(Self.friendlyError(launch))")
+        }
+    }
+
+    static func schemaLaunchArguments(_ schema: String) -> [String] {
+        ["shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", SchemaLink.shellQuoted(schema)]
+    }
+
     static func parsePackageInfo(_ output: String) -> AppPackageInfo? {
         guard let identifier = firstCapture(#"package:\s+name='([^']+)'"#, in: output) else { return nil }
         let activity = firstCapture(#"launchable-activity:\s+name='([^']+)'"#, in: output)
@@ -444,6 +455,12 @@ actor ADBClient {
     private static func friendlyError(_ result: CommandResult) -> String {
         if result.timedOut { return "ADB 响应超时" }
         return result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "ADB 命令执行失败"
+    }
+
+    private static func outputIndicatesLaunchFailure(_ output: String) -> Bool {
+        let lower = output.lowercased()
+        return lower.contains("error:") || lower.contains("exception")
+            || lower.contains("unable to resolve intent")
     }
 }
 

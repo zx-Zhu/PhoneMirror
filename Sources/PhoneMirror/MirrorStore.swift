@@ -100,6 +100,10 @@ final class MirrorStore: ObservableObject {
     var isStreaming: Bool { state == .streaming || state == .connecting }
     var isSystemRecording: Bool { recordingState.isRecording }
     var acceptsPackageDrop: Bool { selectedPlatform == .android || selectedPlatform == .harmonyOS }
+    var canLaunchSchema: Bool {
+        guard let device = selectedDevice else { return false }
+        return device.state.isConnected && device.platform != .ios
+    }
 
     var recordingTimeLabel: String {
         let seconds = max(0, Int(recordingElapsed.rounded(.down)))
@@ -389,6 +393,29 @@ final class MirrorStore: ObservableObject {
                 self.packageInstallState = .failed("安装失败：\(error.localizedDescription)")
             }
             self.scheduleInstallStateReset()
+        }
+    }
+
+    func launchSchema(_ input: String) async -> SchemaLaunchResult {
+        guard let schema = SchemaLink.normalized(input) else {
+            return .failed("请输入包含协议头的完整 Schema，例如 app://page/path")
+        }
+        guard let device = selectedDevice, device.state.isConnected else {
+            return .failed("设备未连接，无法跳转")
+        }
+
+        do {
+            switch device.platform {
+            case .android:
+                try await adbClient.launchSchema(schema, deviceID: device.serial)
+            case .harmonyOS:
+                try await client.launchSchema(schema, deviceID: device.serial)
+            case .ios:
+                return .failed("iOS 当前为只读投屏，不支持 Schema 跳转")
+            }
+            return .succeeded("已向 \(details.model) 发送 Schema 跳转")
+        } catch {
+            return .failed(error.localizedDescription)
         }
     }
 

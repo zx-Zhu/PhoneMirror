@@ -5,6 +5,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store = MirrorStore()
     @State private var showHelp = false
+    @State private var showSchemaLauncher = false
 
     var body: some View {
         HSplitView {
@@ -19,6 +20,9 @@ struct ContentView: View {
         .background(WindowConfigurator(alwaysOnTop: store.alwaysOnTop))
         .sheet(isPresented: $showHelp) {
             HelpView(hdcPath: store.hdcPath, adbPath: store.adbPath, iosPath: store.iosPath)
+        }
+        .sheet(isPresented: $showSchemaLauncher) {
+            SchemaLauncherView(store: store)
         }
         .onChange(of: store.alwaysOnTop) { value in
             NSApp.keyWindow?.level = value ? .floating : .normal
@@ -110,7 +114,11 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
                 if store.hasDisplaySurface {
-                    MirrorStage(store: store, showHelp: $showHelp)
+                    MirrorStage(
+                        store: store,
+                        showHelp: $showHelp,
+                        showSchemaLauncher: $showSchemaLauncher
+                    )
                 } else {
                     WelcomeView(
                         state: store.state,
@@ -214,6 +222,7 @@ struct ContentView: View {
 private struct MirrorStage: View {
     @ObservedObject var store: MirrorStore
     @Binding var showHelp: Bool
+    @Binding var showSchemaLauncher: Bool
     @State private var isPackageDropTargeted = false
 
     var body: some View {
@@ -267,7 +276,11 @@ private struct MirrorStage: View {
                         isPackageDropTargeted = targeted && store.acceptsPackageDrop
                     }
 
-                MirrorControlRail(store: store, showHelp: $showHelp)
+                MirrorControlRail(
+                    store: store,
+                    showHelp: $showHelp,
+                    showSchemaLauncher: $showSchemaLauncher
+                )
                     .frame(width: layout.railWidth)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
@@ -293,6 +306,7 @@ private struct MirrorStage: View {
 private struct MirrorControlRail: View {
     @ObservedObject var store: MirrorStore
     @Binding var showHelp: Bool
+    @Binding var showSchemaLauncher: Bool
 
     var body: some View {
         VStack(spacing: 6) {
@@ -300,6 +314,9 @@ private struct MirrorControlRail: View {
             ControlButton(symbol: "circle", help: "主页（鼠标中键）", enabled: store.selectedPlatform != .ios) { store.send(.namedKey("Home")) }
             ControlButton(symbol: "square.on.square", help: "多任务", enabled: store.selectedPlatform != .ios) { store.send(.keyCode(2210)) }
             ControlButton(symbol: "lock", help: "锁屏 / 电源", enabled: store.selectedPlatform != .ios) { store.send(.namedKey("Power")) }
+            ControlButton(symbol: "link", help: "Schema 跳转", enabled: store.canLaunchSchema) {
+                showSchemaLauncher = true
+            }
 
             RailDivider()
 
@@ -328,6 +345,117 @@ private struct MirrorControlRail: View {
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         }
         .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
+private struct SchemaLauncherView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var store: MirrorStore
+    @AppStorage("lastSchemaLink") private var schema = ""
+    @State private var isLaunching = false
+    @State private var result: SchemaLaunchResult?
+    @FocusState private var isInputFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                Image(systemName: "link.circle.fill")
+                    .font(.system(size: 32))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Schema 跳转").font(.title2.bold())
+                    Text(deviceDescription).foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("完整 Schema").font(.headline)
+                ZStack(alignment: .topLeading) {
+                    if schema.isEmpty {
+                        Text("例如：app://page/path?key=value")
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 8)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $schema)
+                        .font(.system(size: 14, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .padding(.horizontal, 2)
+                        .focused($isInputFocused)
+                }
+                .frame(minHeight: 96)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+                Text("支持自定义协议和 HTTP(S) 链接，参数会原样发送到当前设备。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let result {
+                Label(resultMessage(result), systemImage: resultSymbol(result))
+                    .font(.subheadline)
+                    .foregroundStyle(resultColor(result))
+                    .textSelection(.enabled)
+            }
+
+            HStack {
+                Spacer()
+                Button("关闭") { dismiss() }
+                Button { launch() } label: {
+                    if isLaunching {
+                        ProgressView().controlSize(.small).frame(minWidth: 52)
+                    } else {
+                        Text("跳转").frame(minWidth: 52)
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isLaunching || SchemaLink.normalized(schema) == nil || !store.canLaunchSchema)
+            }
+        }
+        .padding(26)
+        .frame(width: 640)
+        .onAppear { isInputFocused = true }
+        .onChange(of: schema) { _ in result = nil }
+    }
+
+    private var deviceDescription: String {
+        guard let platform = store.selectedPlatform else { return "未选择设备" }
+        return "发送到 \(store.details.model) · \(platform.title)"
+    }
+
+    private func launch() {
+        guard !isLaunching, SchemaLink.normalized(schema) != nil, store.canLaunchSchema else { return }
+        isLaunching = true
+        result = nil
+        Task {
+            result = await store.launchSchema(schema)
+            isLaunching = false
+        }
+    }
+
+    private func resultMessage(_ result: SchemaLaunchResult) -> String {
+        switch result {
+        case .succeeded(let message), .failed(let message): return message
+        }
+    }
+
+    private func resultSymbol(_ result: SchemaLaunchResult) -> String {
+        switch result {
+        case .succeeded: return "checkmark.circle.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func resultColor(_ result: SchemaLaunchResult) -> Color {
+        switch result {
+        case .succeeded: return .green
+        case .failed: return .orange
+        }
     }
 }
 

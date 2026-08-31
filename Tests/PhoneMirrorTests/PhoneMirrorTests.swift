@@ -53,6 +53,30 @@ final class PhoneMirrorTests: XCTestCase {
         )
     }
 
+    func testSchemaLinkNormalization() {
+        XCTAssertEqual(
+            SchemaLink.normalized("  snssdk1128://feed/detail?id=42&source=debug  "),
+            "snssdk1128://feed/detail?id=42&source=debug"
+        )
+        XCTAssertEqual(SchemaLink.normalized("https://example.com/path"), "https://example.com/path")
+        XCTAssertNil(SchemaLink.normalized("example.com/path"))
+        XCTAssertNil(SchemaLink.normalized("1app://page"))
+        XCTAssertNil(SchemaLink.normalized("app://page\nnext"))
+    }
+
+    func testSchemaLaunchArgumentsKeepURIAsSingleArgument() {
+        let schema = "reader://book/detail?id=42&from=phone's mirror"
+        let quoted = "'reader://book/detail?id=42&from=phone'\"'\"'s mirror'"
+        XCTAssertEqual(
+            ADBClient.schemaLaunchArguments(schema),
+            ["shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", quoted]
+        )
+        XCTAssertEqual(
+            HDCClient.schemaLaunchArguments(schema),
+            ["shell", "aa", "start", "-U", quoted]
+        )
+    }
+
     func testMacWindowAndQuitShortcutsAreNotConsumedByMirrorCanvas() {
         XCTAssertFalse(MirrorCanvasView.handlesKeyEvent(keyCode: 12, modifiers: .command)) // Command-Q
         XCTAssertFalse(MirrorCanvasView.handlesKeyEvent(keyCode: 13, modifiers: .command)) // Command-W
