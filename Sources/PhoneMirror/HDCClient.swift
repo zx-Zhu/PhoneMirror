@@ -106,6 +106,39 @@ actor HDCClient {
         ["shell", "aa", "start", "-U", SchemaLink.shellQuoted(schema)]
     }
 
+    func loadExperiments(packageID: String, deviceID: String) async throws -> ExperimentCatalog {
+        guard let executable else { throw ExperimentToolError.command("未找到 hdc") }
+        guard let package = ExperimentInput.normalizedPackage(packageID) else {
+            throw ExperimentToolError.invalidPackage
+        }
+        return try await HarmonyExperimentClient(
+            hdc: executable, deviceID: deviceID, packageID: package
+        ).load()
+    }
+
+    func setExperiment(
+        packageID: String, deviceID: String, key: String, value: String,
+        type: ExperimentValueType, restart: Bool
+    ) async throws -> String {
+        guard let executable else { throw ExperimentToolError.command("未找到 hdc") }
+        guard let package = ExperimentInput.normalizedPackage(packageID) else {
+            throw ExperimentToolError.invalidPackage
+        }
+        return try await HarmonyExperimentClient(
+            hdc: executable, deviceID: deviceID, packageID: package
+        ).set(key: key, value: value, type: type, restart: restart)
+    }
+
+    func restoreExperimentBackup(packageID: String, deviceID: String, restart: Bool) async throws -> String {
+        guard let executable else { throw ExperimentToolError.command("未找到 hdc") }
+        guard let package = ExperimentInput.normalizedPackage(packageID) else {
+            throw ExperimentToolError.invalidPackage
+        }
+        return try await HarmonyExperimentClient(
+            hdc: executable, deviceID: deviceID, packageID: package
+        ).restore(restart: restart)
+    }
+
     static func parsePackageInfo(_ data: Data) -> AppPackageInfo? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let app = root["app"] as? [String: Any],

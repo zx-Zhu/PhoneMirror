@@ -6,6 +6,7 @@ struct ContentView: View {
     @StateObject private var store = MirrorStore()
     @State private var showHelp = false
     @State private var showSchemaLauncher = false
+    @State private var showExperimentEditor = false
 
     var body: some View {
         HSplitView {
@@ -23,6 +24,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showSchemaLauncher) {
             SchemaLauncherView(store: store)
+        }
+        .sheet(isPresented: $showExperimentEditor) {
+            ExperimentEditorView(store: store)
         }
         .onChange(of: store.alwaysOnTop) { value in
             NSApp.keyWindow?.level = value ? .floating : .normal
@@ -117,7 +121,8 @@ struct ContentView: View {
                     MirrorStage(
                         store: store,
                         showHelp: $showHelp,
-                        showSchemaLauncher: $showSchemaLauncher
+                        showSchemaLauncher: $showSchemaLauncher,
+                        showExperimentEditor: $showExperimentEditor
                     )
                 } else {
                     WelcomeView(
@@ -223,6 +228,7 @@ private struct MirrorStage: View {
     @ObservedObject var store: MirrorStore
     @Binding var showHelp: Bool
     @Binding var showSchemaLauncher: Bool
+    @Binding var showExperimentEditor: Bool
     @State private var isPackageDropTargeted = false
 
     var body: some View {
@@ -279,7 +285,8 @@ private struct MirrorStage: View {
                 MirrorControlRail(
                     store: store,
                     showHelp: $showHelp,
-                    showSchemaLauncher: $showSchemaLauncher
+                    showSchemaLauncher: $showSchemaLauncher,
+                    showExperimentEditor: $showExperimentEditor
                 )
                     .frame(width: layout.railWidth)
             }
@@ -307,6 +314,7 @@ private struct MirrorControlRail: View {
     @ObservedObject var store: MirrorStore
     @Binding var showHelp: Bool
     @Binding var showSchemaLauncher: Bool
+    @Binding var showExperimentEditor: Bool
 
     var body: some View {
         VStack(spacing: 6) {
@@ -316,6 +324,9 @@ private struct MirrorControlRail: View {
             ControlButton(symbol: "lock", help: "锁屏 / 电源", enabled: store.selectedPlatform != .ios) { store.send(.namedKey("Power")) }
             ControlButton(symbol: "link", help: "Schema 跳转", enabled: store.canLaunchSchema) {
                 showSchemaLauncher = true
+            }
+            ControlButton(symbol: "switch.2", help: "实验覆盖", enabled: store.canEditExperiments) {
+                showExperimentEditor = true
             }
 
             RailDivider()
@@ -456,6 +467,254 @@ private struct SchemaLauncherView: View {
         case .succeeded: return .green
         case .failed: return .orange
         }
+    }
+}
+
+private struct ExperimentEditorView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var store: MirrorStore
+    @AppStorage("androidExperimentPackage") private var androidPackage = "com.phoenix.read"
+    @AppStorage("harmonyExperimentPackage") private var harmonyPackage = "com.dragon.read.next"
+    @State private var catalog: ExperimentCatalog?
+    @State private var selection: String?
+    @State private var search = ""
+    @State private var draftKey = ""
+    @State private var draftValue = ""
+    @State private var valueType: ExperimentValueType = .json
+    @State private var restart = true
+    @State private var temporary = false
+    @State private var busy = false
+    @State private var message: (text: String, failed: Bool)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "switch.2")
+                    .font(.system(size: 30))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("实验覆盖").font(.title2.bold())
+                    Text(platformDescription).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("关闭") { dismiss() }
+            }
+
+            HStack(spacing: 8) {
+                TextField("应用包名", text: packageBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                Button { load() } label: {
+                    if busy && catalog == nil { ProgressView().controlSize(.small) }
+                    else { Label("读取实验", systemImage: "arrow.clockwise") }
+                }
+                .disabled(busy || normalizedPackage == nil)
+            }
+
+            HSplitView {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("搜索实验 Key", text: $search)
+                        .textFieldStyle(.roundedBorder)
+                    List(filteredEntries, selection: $selection) { entry in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text(entry.key).font(.system(size: 12, weight: .medium, design: .monospaced))
+                                Spacer()
+                                if entry.overridden && store.selectedPlatform == .android {
+                                    Text("已覆盖").font(.caption2).foregroundStyle(.orange)
+                                }
+                            }
+                            Text(entry.value.replacingOccurrences(of: "\n", with: " "))
+                                .lineLimit(1).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .tag(entry.key)
+                    }
+                    Text(catalog?.summary ?? "读取后显示实验列表")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(minWidth: 270, idealWidth: 310)
+
+                VStack(alignment: .leading, spacing: 11) {
+                    HStack {
+                        TextField("实验 Key", text: $draftKey)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(.body, design: .monospaced))
+                            .disabled(store.selectedPlatform == .harmonyOS)
+                        Picker("类型", selection: $valueType) {
+                            ForEach(ExperimentValueType.allCases) { Text($0.title).tag($0) }
+                        }
+                        .labelsHidden().frame(width: 105)
+                    }
+
+                    ZStack(alignment: .topLeading) {
+                        if draftValue.isEmpty {
+                            Text("输入实验值").foregroundStyle(.tertiary).padding(8).allowsHitTesting(false)
+                        }
+                        TextEditor(text: $draftValue)
+                            .font(.system(size: 13, design: .monospaced))
+                            .scrollContentBackground(.hidden).padding(2)
+                    }
+                    .frame(minHeight: 235)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .overlay { RoundedRectangle(cornerRadius: 7).stroke(Color(nsColor: .separatorColor)) }
+
+                    if let entry = selectedEntry, let vid = entry.vid {
+                        Text("vid：\(vid)（写入时保留）").font(.caption).foregroundStyle(.secondary)
+                    } else if store.selectedPlatform == .android, let server = selectedEntry?.serverValue {
+                        Text("服务端值：\(server)").lineLimit(2).font(.caption).foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 14) {
+                        Toggle("写入后重启 App", isOn: $restart)
+                            .disabled(temporary)
+                        if store.selectedPlatform == .android {
+                            Toggle("仅当前运行", isOn: $temporary)
+                                .onChange(of: temporary) { enabled in if enabled { restart = true } }
+                        }
+                        Spacer()
+                    }
+                    .toggleStyle(.checkbox)
+
+                    if store.selectedPlatform == .harmonyOS {
+                        Label("通过 App 已有 DevTool/HDP 写入 common_abtest；只允许修改已有实验。重启后服务端刷新仍可能覆盖。", systemImage: "info.circle")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Label("仅支持 debuggable 包。写入前自动备份 MMKV，失败时自动回滚。", systemImage: "lock.shield")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+
+                    if let message {
+                        Label(message.text, systemImage: message.failed ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                            .font(.caption).foregroundStyle(message.failed ? Color.orange : Color.green)
+                            .textSelection(.enabled)
+                    }
+
+                    HStack {
+                        Button("恢复快照") { restore() }
+                            .disabled(busy || catalog?.hasBackup != true)
+                        if catalog?.canRemove == true, selectedEntry?.overridden == true {
+                            Button("移除覆盖", role: .destructive) { remove() }.disabled(busy)
+                        }
+                        Spacer()
+                        Button("格式化") { formatValue() }.disabled(busy || draftValue.isEmpty)
+                        Button { save() } label: {
+                            if busy { ProgressView().controlSize(.small).frame(minWidth: 62) }
+                            else { Text("保存实验").frame(minWidth: 62) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(busy || draftKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                  || normalizedPackage == nil)
+                    }
+                }
+                .padding(.leading, 12)
+                .frame(minWidth: 430)
+            }
+        }
+        .padding(24)
+        .frame(width: 900, height: 610)
+        .onAppear { load() }
+        .onChange(of: selection) { key in select(key) }
+        .onChange(of: store.selectedDeviceID) { _ in catalog = nil; selection = nil; load() }
+    }
+
+    private var packageBinding: Binding<String> {
+        store.selectedPlatform == .harmonyOS ? $harmonyPackage : $androidPackage
+    }
+
+    private var normalizedPackage: String? { ExperimentInput.normalizedPackage(packageBinding.wrappedValue) }
+    private var platformDescription: String {
+        guard let platform = store.selectedPlatform else { return "未选择设备" }
+        return "\(store.details.model) · \(platform.title) · 零业务源码改动"
+    }
+    private var filteredEntries: [ExperimentEntry] {
+        guard let entries = catalog?.entries else { return [] }
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        return query.isEmpty ? entries : entries.filter { $0.key.localizedCaseInsensitiveContains(query) }
+    }
+    private var selectedEntry: ExperimentEntry? { catalog?.entries.first(where: { $0.key == selection }) }
+
+    private func select(_ key: String?) {
+        guard let key, let entry = catalog?.entries.first(where: { $0.key == key }) else { return }
+        draftKey = entry.key
+        draftValue = entry.value
+        valueType = ExperimentValueType.inferred(from: entry.value)
+        message = nil
+    }
+
+    private func load(preferredKey: String? = nil) {
+        guard !busy, let package = normalizedPackage else { return }
+        busy = true; message = nil
+        Task {
+            do {
+                let result = try await store.loadExperiments(packageID: package)
+                catalog = result
+                let target = preferredKey.flatMap { key in result.entries.contains(where: { $0.key == key }) ? key : nil }
+                    ?? selection.flatMap { key in result.entries.contains(where: { $0.key == key }) ? key : nil }
+                    ?? result.entries.first?.key
+                selection = target
+                select(target)
+            } catch {
+                catalog = nil
+                message = (error.localizedDescription, true)
+            }
+            busy = false
+        }
+    }
+
+    private func save() {
+        guard !busy, let package = normalizedPackage else { return }
+        let key = draftKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        busy = true; message = nil
+        Task {
+            do {
+                let result = try await store.setExperiment(
+                    packageID: package, key: key, value: draftValue, type: valueType,
+                    restart: restart, temporary: temporary
+                )
+                message = (result, false)
+                catalog = try await store.loadExperiments(packageID: package)
+                selection = key; select(key)
+                message = (result, false)
+            } catch { message = (error.localizedDescription, true) }
+            busy = false
+        }
+    }
+
+    private func remove() {
+        guard !busy, let package = normalizedPackage, let key = selection else { return }
+        busy = true; message = nil
+        Task {
+            do {
+                let result = try await store.removeExperiment(packageID: package, key: key, restart: restart)
+                catalog = try await store.loadExperiments(packageID: package)
+                selection = catalog?.entries.first?.key; select(selection)
+                message = (result, false)
+            } catch { message = (error.localizedDescription, true) }
+            busy = false
+        }
+    }
+
+    private func restore() {
+        guard !busy, let package = normalizedPackage else { return }
+        busy = true; message = nil
+        Task {
+            do {
+                let result = try await store.restoreExperimentBackup(packageID: package, restart: restart)
+                catalog = try await store.loadExperiments(packageID: package)
+                selection = catalog?.entries.first?.key; select(selection)
+                message = (result, false)
+            } catch { message = (error.localizedDescription, true) }
+            busy = false
+        }
+    }
+
+    private func formatValue() {
+        guard let object = try? valueType.jsonObject(from: draftValue),
+              valueType == .json, JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
+              let value = String(data: data, encoding: .utf8) else { return }
+        draftValue = value
     }
 }
 

@@ -12,6 +12,7 @@
 - Android 使用 scrcpy 实时触控；HarmonyOS 使用 UiTest RPC 实时发送 DOWN/MOVE/UP，连接失败时自动回退稳定的 click/swipe
 - Android 与 HarmonyOS 支持返回、主页、多任务和电源等快捷操作
 - Android 与 HarmonyOS 支持输入完整 Schema / URL 并跳转到对应应用页面
+- Android 与 HarmonyOS 支持从 Mac 读取和覆盖调试包实验值，无需修改业务仓源码
 - 将 `.apk` 或 `.hap` 拖到对应设备的投屏画面，可覆盖安装并自动启动应用
 - 两种平台均使用手机系统录屏，不依赖投屏画面
 - iOS 使用 QuickTime USB 只读投屏，手机端无需安装 App；仅在用户主动开始投屏时请求一次 macOS 相机权限
@@ -72,6 +73,7 @@ PHONE_MIRROR_HARMONY_TEST_DEVICE=鸿蒙设备ID PHONE_MIRROR_ANDROID_TEST_DEVICE
 | 中键（Android / HarmonyOS） | Home |
 | 输入文字（Android / HarmonyOS） | 输入到当前焦点 |
 | 右侧链接按钮（Android / HarmonyOS） | 输入 Schema / URL 并跳转 |
+| 右侧实验按钮（Android / HarmonyOS） | 读取、搜索、编辑实验值并按需重启 App |
 | 拖入 `.apk`（Android） | 覆盖安装并启动应用 |
 | 拖入 `.hap`（HarmonyOS） | 覆盖安装并启动应用 |
 | 相机按钮 | 将当前画面保存为 PNG 文件并复制到剪贴板 |
@@ -91,6 +93,22 @@ Android 使用 scrcpy 的连续 DOWN/MOVE/UP 控制协议；HarmonyOS 使用随�
 iOS 使用 QuickTime 同源的 `.muxed` AVFoundation 采集设备，只提供只读画面。手机端无需安装 App；只有用户主动开始 iOS 投屏时，macOS 才会请求一次相机权限，该权限实际用于读取 USB 屏幕源。PhoneMirror 不采集 iOS 音频，也不请求麦克风权限。
 
 Android 安装包通过 `adb install -r` 覆盖安装，并从 APK manifest 读取 Launcher Activity 后启动。HarmonyOS 安装包通过 `hdc install -r` 覆盖安装，并从 HAP 的 `module.json` 读取 bundle、module 和 main ability 后启动。设备列表默认只展示在线设备。
+
+### 实验覆盖
+
+实验面板只面向调试包，并在写入前校验包名和值类型：
+
+- Android 通过 `adb run-as` 读取 debug 包的未加密 MMKV，使用 App 已有的
+  `LocalAbOverrideManager` 覆盖层。写入前保存整对 MMKV/CRC 快照，写后进行字节校验；
+  支持移除单项覆盖、恢复上次快照，以及“仅当前运行”模式。该能力要求安装包为
+  debuggable，且包内本地实验开关和 local-test 环境已启用。
+- HarmonyOS 通过 debug 包已有的 `@hpaas/devtool` HDP HDC 本地通道，在 App
+  进程内修改 `common_abtest` Keva。为保留实验元数据，只允许修改设备上已经存在且
+  带有 `vid` 的实验；写入前保存值级快照。请先启动 App，确保 DevTool 已完成初始化。
+- 默认使用“写入后重启 App”以刷新进程缓存。HarmonyOS 的启动期服务端实验请求可能再次
+  覆盖本地值；Android 的“仅当前运行”会在 App 加载覆盖后恢复磁盘值，下次冷启动自动失效。
+
+PhoneMirror 不尝试访问 HarmonyOS 应用沙箱文件，也不对正式包进行调试器注入。
 
 ## 隐私
 

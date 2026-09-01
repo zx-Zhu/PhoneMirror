@@ -77,6 +77,90 @@ final class PhoneMirrorTests: XCTestCase {
         )
     }
 
+    func testExperimentInputValidationAndTypeInference() throws {
+        XCTAssertEqual(ExperimentInput.normalizedPackage(" com.phoenix.read "), "com.phoenix.read")
+        XCTAssertNil(ExperimentInput.normalizedPackage("com.phoenix.read;rm"))
+        XCTAssertNil(ExperimentInput.normalizedPackage("../com.phoenix"))
+        XCTAssertEqual(try ExperimentInput.normalizedKey("  feed_style_v2  "), "feed_style_v2")
+        XCTAssertEqual(ExperimentValueType.inferred(from: #"{"enable":true}"#), .json)
+        XCTAssertEqual(ExperimentValueType.inferred(from: "false"), .boolean)
+        XCTAssertEqual(ExperimentValueType.inferred(from: "42"), .integer)
+        XCTAssertEqual(ExperimentValueType.inferred(from: "3.14"), .double)
+        XCTAssertEqual(ExperimentValueType.inferred(from: "control"), .string)
+        XCTAssertThrowsError(try ExperimentValueType.boolean.validatedText("yes"))
+        XCTAssertThrowsError(try ExperimentValueType.json.validatedText("42"))
+    }
+
+    func testMMKVCodecReadsAndAppendsLastWinsStringWithCRC() throws {
+        var region = Data([0xff, 0xff, 0xff, 0x07])
+        region.append(Self.mmkvEntry(key: "plain", encodedValue: Data([1])))
+        region.append(Self.mmkvEntry(key: "target", encodedValue: Self.mmkvString("old")))
+        var main = Data()
+        main.append(Self.littleEndian(UInt32(region.count)))
+        main.append(region)
+        main.append(Data(repeating: 0, count: 4_096 - main.count))
+        var crc = Data(repeating: 0, count: 4_096)
+        crc.replaceSubrange(0..<4, with: Self.littleEndian(CRC32.checksum(region)))
+        crc.replaceSubrange(4..<8, with: Self.littleEndian(3))
+        crc.replaceSubrange(8..<12, with: Self.littleEndian(9))
+        crc.replaceSubrange(28..<32, with: Self.littleEndian(UInt32(region.count)))
+
+        let document = try MMKVDocument(main: main, crc: crc)
+        XCTAssertEqual(try document.string(for: "target"), "old")
+        let updated = try document.appendingString(#"{"demo":"value"}"#, for: "target")
+        let verified = try MMKVDocument(main: updated.main, crc: updated.crc)
+        XCTAssertEqual(try verified.string(for: "target"), #"{"demo":"value"}"#)
+        XCTAssertEqual(updated.main.count, 4_096)
+        XCTAssertEqual(Self.readLittleEndian(updated.crc, at: 8), 10)
+    }
+
+    func testMMKVCodecRejectsBadCRCAndEncryption() {
+        let region = Data([0xff, 0xff, 0xff, 0x07])
+        var main = Self.littleEndian(UInt32(region.count)) + region
+        main.append(Data(repeating: 0, count: 4_096 - main.count))
+        var badCRC = Data(repeating: 0, count: 4_096)
+        XCTAssertThrowsError(try MMKVDocument(main: main, crc: badCRC))
+        badCRC.replaceSubrange(0..<4, with: Self.littleEndian(CRC32.checksum(region)))
+        badCRC[12] = 1
+        XCTAssertThrowsError(try MMKVDocument(main: main, crc: badCRC))
+    }
+
+    func testHarmonyHDPJSONStreamParserHandlesSplitAndCoalescedObjects() throws {
+        var parser = HarmonyHDPJSONStreamParser()
+        XCTAssertTrue(try parser.append(Data(#"{"from":"pho"# .utf8)).isEmpty)
+        let messages = try parser.append(Data(#"ne"}{"id":"probe:1","result":{"text":"}\""}}"# .utf8))
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0]["from"] as? String, "phone")
+        XCTAssertEqual(messages[1]["id"] as? String, "probe:1")
+        XCTAssertEqual((messages[1]["result"] as? [String: String])?["text"], "}\"")
+    }
+
+    func testHarmonyHDPTransportEscapesNonASCII() throws {
+        let data = try HarmonyHDPSession.asciiJSONData(["value": "中文📱"])
+        let text = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(text.unicodeScalars.allSatisfy { $0.isASCII })
+        XCTAssertTrue(text.contains(#"\u4e2d\u6587"#))
+        XCTAssertTrue(text.contains(#"\ud83d\udcf1"#))
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: data) as? [String: String])?["value"], "中文📱")
+    }
+
+    func testHarmonyHDPFragmentsLargeRequestParameters() throws {
+        let request: [String: Any] = [
+            "id": "probe:large", "method": "KVStorage.setValue",
+            "params": ["value": String(repeating: "a", count: 70 * 1_024)]
+        ]
+        let messages = try HarmonyHDPSession.requestMessages(request)
+        XCTAssertEqual(messages.count, 2)
+        XCTAssertEqual(messages[0]["index"] as? Int, 0)
+        XCTAssertEqual(messages[1]["index"] as? Int, 1)
+        XCTAssertEqual(messages[0]["total"] as? Int, 2)
+        XCTAssertEqual(messages[0]["hasMore"] as? Bool, true)
+        XCTAssertEqual(messages[1]["hasMore"] as? Bool, false)
+        let joined = messages.compactMap { $0["params"] as? String }.joined()
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(joined.utf8)) as? [String: String])?["value"],
+                       String(repeating: "a", count: 70 * 1_024))
+    }
+
     func testMacWindowAndQuitShortcutsAreNotConsumedByMirrorCanvas() {
         XCTAssertFalse(MirrorCanvasView.handlesKeyEvent(keyCode: 12, modifiers: .command)) // Command-Q
         XCTAssertFalse(MirrorCanvasView.handlesKeyEvent(keyCode: 13, modifiers: .command)) // Command-W
@@ -432,6 +516,40 @@ final class PhoneMirrorTests: XCTestCase {
         return packet
     }
 
+    private static func mmkvEntry(key: String, encodedValue: Data) -> Data {
+        var result = mmkvVarint(UInt64(key.utf8.count))
+        result.append(Data(key.utf8))
+        result.append(mmkvVarint(UInt64(encodedValue.count)))
+        result.append(encodedValue)
+        return result
+    }
+
+    private static func mmkvString(_ value: String) -> Data {
+        mmkvVarint(UInt64(value.utf8.count)) + Data(value.utf8)
+    }
+
+    private static func mmkvVarint(_ value: UInt64) -> Data {
+        var value = value
+        var result = Data()
+        repeat {
+            var byte = UInt8(value & 0x7f)
+            value >>= 7
+            if value != 0 { byte |= 0x80 }
+            result.append(byte)
+        } while value != 0
+        return result
+    }
+
+    private static func littleEndian(_ value: UInt32) -> Data {
+        Data([UInt8(value & 0xff), UInt8((value >> 8) & 0xff),
+              UInt8((value >> 16) & 0xff), UInt8((value >> 24) & 0xff)])
+    }
+
+    private static func readLittleEndian(_ data: Data, at offset: Int) -> UInt32 {
+        UInt32(data[offset]) | UInt32(data[offset + 1]) << 8
+            | UInt32(data[offset + 2]) << 16 | UInt32(data[offset + 3]) << 24
+    }
+
     private static func harmonyCastingPacket(payload: Data, flags: UInt8, pts: UInt64) -> Data {
         var packet = Data()
         packet.appendBigEndian(UInt32(9 + payload.count))
@@ -487,6 +605,61 @@ final class PhoneMirrorTests: XCTestCase {
         await client.stopStream(deviceID: deviceID)
         XCTAssertTrue(HDCClient.isMP4File(local))
         XCTAssertGreaterThan((try local.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0, 1_024)
+    }
+
+    func testAndroidExperimentCatalogOnConnectedDevice() async throws {
+        guard let deviceID = ProcessInfo.processInfo.environment["PHONE_MIRROR_ANDROID_EXPERIMENT_TEST_DEVICE"],
+              !deviceID.isEmpty else {
+            throw XCTSkip("Set PHONE_MIRROR_ANDROID_EXPERIMENT_TEST_DEVICE to run the read-only experiment test")
+        }
+        let client = ADBClient()
+        let catalog = try await client.loadExperiments(packageID: "com.phoenix.read", deviceID: deviceID)
+        XCTAssertFalse(catalog.summary.isEmpty)
+        XCTAssertTrue(catalog.canAdd)
+        XCTAssertTrue(catalog.canRemove)
+    }
+
+    func testHarmonyExperimentCatalogOnConnectedDevice() async throws {
+        guard let deviceID = ProcessInfo.processInfo.environment["PHONE_MIRROR_HARMONY_EXPERIMENT_TEST_DEVICE"],
+              !deviceID.isEmpty else {
+            throw XCTSkip("Set PHONE_MIRROR_HARMONY_EXPERIMENT_TEST_DEVICE to run the read-only experiment test")
+        }
+        let packageID = ProcessInfo.processInfo.environment["PHONE_MIRROR_HARMONY_EXPERIMENT_TEST_PACKAGE"]
+            ?? "com.dragon.read.next"
+        let client = HDCClient()
+        let catalog = try await client.loadExperiments(packageID: packageID, deviceID: deviceID)
+        XCTAssertFalse(catalog.entries.isEmpty)
+        XCTAssertFalse(catalog.canAdd)
+        XCTAssertFalse(catalog.canRemove)
+        XCTAssertTrue(catalog.entries.allSatisfy { $0.vid != nil })
+    }
+
+    func testHarmonyLaunchTargetParsing() {
+        let dump = """
+        com.example.demo:
+        {
+          "entryModuleName": "app",
+          "hapModuleInfos": [
+            {
+              "moduleName": "widget",
+              "abilityInfos": [{"name": "WidgetAbility", "isLauncherAbility": false}]
+            },
+            {
+              "moduleName": "app",
+              "abilityInfos": [
+                {
+                  "name": "MainAbility",
+                  "isLauncherAbility": false,
+                  "skills": [{"actions": ["action.system.home"]}]
+                }
+              ]
+            }
+          ]
+        }
+        """
+        let target = HarmonyExperimentClient.parseLaunchTarget(dump)
+        XCTAssertEqual(target?.module, "app")
+        XCTAssertEqual(target?.ability, "MainAbility")
     }
 }
 

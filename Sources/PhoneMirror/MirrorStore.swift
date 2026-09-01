@@ -104,6 +104,7 @@ final class MirrorStore: ObservableObject {
         guard let device = selectedDevice else { return false }
         return device.state.isConnected && device.platform != .ios
     }
+    var canEditExperiments: Bool { canLaunchSchema }
 
     var recordingTimeLabel: String {
         let seconds = max(0, Int(recordingElapsed.rounded(.down)))
@@ -416,6 +417,76 @@ final class MirrorStore: ObservableObject {
             return .succeeded("已向 \(details.model) 发送 Schema 跳转")
         } catch {
             return .failed(error.localizedDescription)
+        }
+    }
+
+    func loadExperiments(packageID: String) async throws -> ExperimentCatalog {
+        guard let device = selectedDevice, device.state.isConnected else {
+            throw ExperimentToolError.unsupported("设备未连接，无法读取实验")
+        }
+        switch device.platform {
+        case .android:
+            return try await adbClient.loadExperiments(packageID: packageID, deviceID: device.serial)
+        case .harmonyOS:
+            return try await client.loadExperiments(packageID: packageID, deviceID: device.serial)
+        case .ios:
+            throw ExperimentToolError.unsupported("iOS 当前为只读投屏，不支持实验覆盖")
+        }
+    }
+
+    func setExperiment(
+        packageID: String, key: String, value: String, type: ExperimentValueType,
+        restart: Bool, temporary: Bool
+    ) async throws -> String {
+        guard let device = selectedDevice, device.state.isConnected else {
+            throw ExperimentToolError.unsupported("设备未连接，无法写入实验")
+        }
+        switch device.platform {
+        case .android:
+            return try await adbClient.setExperiment(
+                packageID: packageID, deviceID: device.serial, key: key, value: value,
+                type: type, restart: restart, temporary: temporary
+            )
+        case .harmonyOS:
+            guard !temporary else {
+                throw ExperimentToolError.unsupported("HarmonyOS 暂不支持仅当前运行模式")
+            }
+            return try await client.setExperiment(
+                packageID: packageID, deviceID: device.serial, key: key, value: value,
+                type: type, restart: restart
+            )
+        case .ios:
+            throw ExperimentToolError.unsupported("iOS 当前为只读投屏，不支持实验覆盖")
+        }
+    }
+
+    func removeExperiment(packageID: String, key: String, restart: Bool) async throws -> String {
+        guard let device = selectedDevice, device.state.isConnected else {
+            throw ExperimentToolError.unsupported("设备未连接，无法移除实验覆盖")
+        }
+        guard device.platform == .android else {
+            throw ExperimentToolError.unsupported("HarmonyOS 不删除服务端实验，请使用“恢复快照”回退")
+        }
+        return try await adbClient.removeExperiment(
+            packageID: packageID, deviceID: device.serial, key: key, restart: restart
+        )
+    }
+
+    func restoreExperimentBackup(packageID: String, restart: Bool) async throws -> String {
+        guard let device = selectedDevice, device.state.isConnected else {
+            throw ExperimentToolError.unsupported("设备未连接，无法恢复实验快照")
+        }
+        switch device.platform {
+        case .android:
+            return try await adbClient.restoreExperimentBackup(
+                packageID: packageID, deviceID: device.serial, restart: restart
+            )
+        case .harmonyOS:
+            return try await client.restoreExperimentBackup(
+                packageID: packageID, deviceID: device.serial, restart: restart
+            )
+        case .ios:
+            throw ExperimentToolError.unsupported("iOS 当前为只读投屏，不支持实验覆盖")
         }
     }
 

@@ -168,10 +168,249 @@ actor ADBClient {
         ["shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", SchemaLink.shellQuoted(schema)]
     }
 
+    func loadExperiments(packageID: String, deviceID: String) async throws -> ExperimentCatalog {
+        let package = try Self.validatedPackage(packageID)
+        try await ensureRunAs(package: package, deviceID: deviceID)
+        let overrides = try await readAndroidOverrideMap(package: package, deviceID: deviceID)
+        let catalog = (try? await readAndroidCatalog(package: package, deviceID: deviceID)) ?? [:]
+        let keys = Set(overrides.keys).union(catalog.keys).sorted()
+        let entries = keys.map { key -> ExperimentEntry in
+            let server = catalog[key].map(ExperimentInput.displayText)
+            return ExperimentEntry(
+                key: key, value: overrides[key] ?? server ?? "", serverValue: server,
+                overridden: overrides[key] != nil, vid: nil
+            )
+        }
+        return ExperimentCatalog(
+            entries: entries,
+            summary: "服务端实验 \(catalog.count) · 本地覆盖 \(overrides.count)",
+            canAdd: true, canRemove: true,
+            hasBackup: ExperimentBackupStore.hasAndroidBackup(deviceID: deviceID, packageID: package)
+        )
+    }
+
+    func setExperiment(
+        packageID: String, deviceID: String, key inputKey: String, value: String,
+        type: ExperimentValueType, restart: Bool, temporary: Bool
+    ) async throws -> String {
+        let package = try Self.validatedPackage(packageID)
+        let key = try ExperimentInput.normalizedKey(inputKey)
+        let validated = try type.validatedText(value)
+        try await ensureRunAs(package: package, deviceID: deviceID)
+        try await forceStop(package: package, deviceID: deviceID)
+        try? await Task.sleep(for: .milliseconds(350))
+
+        let original = try await readAndroidPair(package: package, deviceID: deviceID)
+        let document = try MMKVDocument(main: original.main, crc: original.crc)
+        var map = try Self.decodeOverrideMap(try document.string(for: Self.abOverrideKey))
+        let originalMap = map
+        map[key] = validated
+        let payload = try Self.encodeOverrideMap(map)
+        let updated = try document.appendingString(payload, for: Self.abOverrideKey)
+        try ExperimentBackupStore.saveAndroid(
+            main: original.main, crc: original.crc, deviceID: deviceID, packageID: package
+        )
+        try await writeAndroidPair(
+            updated, rollback: original, package: package, deviceID: deviceID
+        )
+
+        if temporary {
+            do {
+                try await launch(package: package, deviceID: deviceID)
+                try await waitUntilRunning(package: package, deviceID: deviceID)
+                // Restore only the override-map entry against the latest live
+                // file, retaining unrelated debug properties written at launch.
+                let live = try await readAndroidPair(package: package, deviceID: deviceID)
+                let liveDocument = try MMKVDocument(main: live.main, crc: live.crc)
+                let restoredPayload = try Self.encodeOverrideMap(originalMap)
+                let restored = try liveDocument.appendingString(restoredPayload, for: Self.abOverrideKey)
+                try await writeAndroidPair(restored, rollback: live, package: package, deviceID: deviceID)
+            } catch {
+                do {
+                    try await forceStop(package: package, deviceID: deviceID)
+                    try await writeAndroidPair(original, rollback: updated, package: package, deviceID: deviceID)
+                } catch {
+                    throw ExperimentToolError.command("临时实验启动失败，且磁盘快照回滚失败：\(error.localizedDescription)")
+                }
+                throw ExperimentToolError.command("临时实验启动失败，已恢复原始磁盘快照：\(error.localizedDescription)")
+            }
+            return "已覆盖「\(key)」，仅当前运行有效"
+        }
+        if restart { try await launch(package: package, deviceID: deviceID) }
+        return restart ? "已覆盖「\(key)」并重启 App" : "已写入「\(key)」，App 当前保持停止"
+    }
+
+    func removeExperiment(
+        packageID: String, deviceID: String, key inputKey: String, restart: Bool
+    ) async throws -> String {
+        let package = try Self.validatedPackage(packageID)
+        let key = try ExperimentInput.normalizedKey(inputKey)
+        try await ensureRunAs(package: package, deviceID: deviceID)
+        try await forceStop(package: package, deviceID: deviceID)
+        try? await Task.sleep(for: .milliseconds(350))
+        let original = try await readAndroidPair(package: package, deviceID: deviceID)
+        let document = try MMKVDocument(main: original.main, crc: original.crc)
+        var map = try Self.decodeOverrideMap(try document.string(for: Self.abOverrideKey))
+        map.removeValue(forKey: key)
+        let payload = try Self.encodeOverrideMap(map)
+        let updated = try document.appendingString(payload, for: Self.abOverrideKey)
+        try ExperimentBackupStore.saveAndroid(
+            main: original.main, crc: original.crc, deviceID: deviceID, packageID: package
+        )
+        try await writeAndroidPair(updated, rollback: original, package: package, deviceID: deviceID)
+        if restart { try await launch(package: package, deviceID: deviceID) }
+        return restart ? "已移除「\(key)」覆盖并重启 App" : "已移除「\(key)」覆盖，App 当前保持停止"
+    }
+
+    func restoreExperimentBackup(packageID: String, deviceID: String, restart: Bool) async throws -> String {
+        let package = try Self.validatedPackage(packageID)
+        try await ensureRunAs(package: package, deviceID: deviceID)
+        guard let backup = try ExperimentBackupStore.loadAndroid(deviceID: deviceID, packageID: package) else {
+            throw ExperimentToolError.unsupported("没有可恢复的 Android 实验快照")
+        }
+        _ = try MMKVDocument(main: backup.main, crc: backup.crc)
+        try await forceStop(package: package, deviceID: deviceID)
+        try? await Task.sleep(for: .milliseconds(350))
+        let current = try await readAndroidPair(package: package, deviceID: deviceID)
+        try await writeAndroidPair(backup, rollback: current, package: package, deviceID: deviceID)
+        try ExperimentBackupStore.saveAndroid(
+            main: current.main, crc: current.crc, deviceID: deviceID, packageID: package
+        )
+        if restart { try await launch(package: package, deviceID: deviceID) }
+        return restart ? "已恢复上次快照并重启 App" : "已恢复上次快照，App 当前保持停止"
+    }
+
     static func parsePackageInfo(_ output: String) -> AppPackageInfo? {
         guard let identifier = firstCapture(#"package:\s+name='([^']+)'"#, in: output) else { return nil }
         let activity = firstCapture(#"launchable-activity:\s+name='([^']+)'"#, in: output)
         return AppPackageInfo(identifier: identifier, moduleName: nil, entryPoint: activity)
+    }
+
+    private static let abOverrideFile = "files/mmkv/prefix_public_debug_properties"
+    private static let abOverrideKey = "key_ab_info_local_override_result"
+    private static let abCatalogFile = "files/mmkv/id_common_ab_result"
+    private static let abCatalogKey = "key_common_ab_result_json"
+
+    private static func validatedPackage(_ input: String) throws -> String {
+        guard let package = ExperimentInput.normalizedPackage(input) else { throw ExperimentToolError.invalidPackage }
+        return package
+    }
+
+    private func ensureRunAs(package: String, deviceID: String) async throws {
+        let result = await execute(deviceID, ["exec-out", "run-as", package, "id"], timeout: 5)
+        guard result.succeeded, result.stdout.contains("uid=") else {
+            throw ExperimentToolError.unsupported("run-as 失败，请确认包名正确且当前安装包为 debuggable")
+        }
+    }
+
+    private func readAndroidOverrideMap(package: String, deviceID: String) async throws -> [String: String] {
+        let pair = try await readAndroidPair(package: package, deviceID: deviceID)
+        let document = try MMKVDocument(main: pair.main, crc: pair.crc)
+        return try Self.decodeOverrideMap(try document.string(for: Self.abOverrideKey))
+    }
+
+    private func readAndroidCatalog(package: String, deviceID: String) async throws -> [String: Any] {
+        let main = try await runAsRead(Self.abCatalogFile, package: package, deviceID: deviceID)
+        let crc = try await runAsRead(Self.abCatalogFile + ".crc", package: package, deviceID: deviceID)
+        let document = try MMKVDocument(main: main, crc: crc)
+        guard let raw = try document.string(for: Self.abCatalogKey), let data = raw.data(using: .utf8),
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return root.mapValues { value in
+            if let item = value as? [String: Any], let actual = item["val"] { return actual }
+            return value
+        }
+    }
+
+    private static func decodeOverrideMap(_ raw: String?) throws -> [String: String] {
+        guard let raw, !raw.isEmpty else { return [:] }
+        guard let data = raw.data(using: .utf8),
+              let map = try JSONSerialization.jsonObject(with: data) as? [String: String] else {
+            throw ExperimentToolError.corruptStorage("本地实验覆盖不是合法的 JSON 字符串映射")
+        }
+        return map
+    }
+
+    private static func encodeOverrideMap(_ map: [String: String]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: map, options: [.sortedKeys])
+        guard let result = String(data: data, encoding: .utf8) else {
+            throw ExperimentToolError.invalidValue("实验覆盖无法编码为 UTF-8")
+        }
+        return result
+    }
+
+    private func readAndroidPair(package: String, deviceID: String) async throws -> (main: Data, crc: Data) {
+        let main = try await runAsRead(Self.abOverrideFile, package: package, deviceID: deviceID)
+        let crc = try await runAsRead(Self.abOverrideFile + ".crc", package: package, deviceID: deviceID)
+        return (main, crc)
+    }
+
+    private func runAsRead(_ path: String, package: String, deviceID: String) async throws -> Data {
+        let result = await executeData(
+            ["-s", deviceID, "exec-out", "run-as", package, "cat", path], timeout: 8
+        )
+        guard result.status == 0, !result.data.isEmpty else {
+            throw ExperimentToolError.command("读取 \(path) 失败：\(result.stderr.nilIfEmpty ?? "文件不存在，请先启动一次调试包")")
+        }
+        return result.data
+    }
+
+    private func writeAndroidPair(
+        _ pair: (main: Data, crc: Data), rollback: (main: Data, crc: Data),
+        package: String, deviceID: String
+    ) async throws {
+        do {
+            try await pushRunAs(pair.crc, to: Self.abOverrideFile + ".crc", package: package, deviceID: deviceID)
+            try await pushRunAs(pair.main, to: Self.abOverrideFile, package: package, deviceID: deviceID)
+            let verified = try await readAndroidPair(package: package, deviceID: deviceID)
+            guard verified.main == pair.main, verified.crc == pair.crc else {
+                throw ExperimentToolError.command("写入后文件校验不一致")
+            }
+        } catch {
+            try? await pushRunAs(rollback.crc, to: Self.abOverrideFile + ".crc", package: package, deviceID: deviceID)
+            try? await pushRunAs(rollback.main, to: Self.abOverrideFile, package: package, deviceID: deviceID)
+            throw ExperimentToolError.command("Android 实验写入失败，已尝试回滚：\(error.localizedDescription)")
+        }
+    }
+
+    private func pushRunAs(_ data: Data, to path: String, package: String, deviceID: String) async throws {
+        let local = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PhoneMirror-\(UUID().uuidString).bin")
+        let remote = "/data/local/tmp/phonemirror_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        try data.write(to: local, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: local) }
+        let push = await executeRaw(["-s", deviceID, "push", local.path, remote], timeout: 15)
+        guard push.succeeded else { throw ExperimentToolError.command(Self.friendlyError(push)) }
+        defer { Task { _ = await self.execute(deviceID, ["shell", "rm", "-f", remote], timeout: 3) } }
+        let copy = await execute(
+            deviceID, ["shell", "run-as", package, "cp", remote, path], timeout: 8
+        )
+        guard copy.succeeded else { throw ExperimentToolError.command(Self.friendlyError(copy)) }
+    }
+
+    private func forceStop(package: String, deviceID: String) async throws {
+        let result = await execute(deviceID, ["shell", "am", "force-stop", package], timeout: 5)
+        guard result.succeeded else { throw ExperimentToolError.command(Self.friendlyError(result)) }
+    }
+
+    private func launch(package: String, deviceID: String) async throws {
+        let result = await execute(
+            deviceID, ["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"],
+            timeout: 15
+        )
+        guard result.succeeded || result.timedOut else { throw ExperimentToolError.command(Self.friendlyError(result)) }
+    }
+
+    private func waitUntilRunning(package: String, deviceID: String) async throws {
+        let deadline = Date().addingTimeInterval(20)
+        while Date() < deadline {
+            let result = await execute(deviceID, ["shell", "pidof", package], timeout: 3)
+            if result.succeeded, !result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                try? await Task.sleep(for: .milliseconds(1_500))
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(400))
+        }
+        throw ExperimentToolError.command("等待 App 启动超时，临时覆盖未清理")
     }
 
     func send(_ command: RemoteCommand, to deviceID: String, resolution: CGSize) async -> Bool {
