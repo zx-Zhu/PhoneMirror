@@ -27,6 +27,10 @@ cp "$PROJECT_DIR/third_party/uitest_agent_v1.2.4.so" "$CONTENTS_DIR/Resources/ui
 cp "$PROJECT_DIR/third_party/HDCTOOL-LICENSE" "$CONTENTS_DIR/Resources/HDCTOOL-LICENSE"
 cp "$PROJECT_DIR/third_party/libscreen_casting.z.so" "$CONTENTS_DIR/Resources/libscreen_casting.z.so"
 cp "$PROJECT_DIR/scripts/harmony_cast_bridge.py" "$CONTENTS_DIR/Resources/harmony_cast_bridge.py"
+mkdir -p "$CONTENTS_DIR/Resources/runtime-settings-bridge"
+javac --add-modules jdk.jdi \
+  -d "$CONTENTS_DIR/Resources/runtime-settings-bridge" \
+  "$PROJECT_DIR/tools/RuntimeSettingsBridge.java"
 ditto "$PROJECT_DIR/third_party/harmony_python" "$CONTENTS_DIR/Resources/harmony_python"
 cp "$PROJECT_DIR/third_party/GRPC-LICENSE" "$CONTENTS_DIR/Resources/GRPC-LICENSE"
 cp "$PROJECT_DIR/third_party/PROTOBUF-LICENSE" "$CONTENTS_DIR/Resources/PROTOBUF-LICENSE"

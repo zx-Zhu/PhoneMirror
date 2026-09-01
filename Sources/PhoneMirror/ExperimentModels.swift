@@ -30,7 +30,7 @@ enum ExperimentValueType: String, CaseIterable, Identifiable, Sendable {
 
     func validatedText(_ input: String) throws -> String {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || self == .string else { throw ExperimentToolError.invalidValue("实验值不能为空") }
+        guard !trimmed.isEmpty || self == .string else { throw ExperimentToolError.invalidValue("配置值不能为空") }
         switch self {
         case .string:
             return input
@@ -125,10 +125,10 @@ enum ExperimentInput {
 
     static func normalizedKey(_ input: String) throws -> String {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { throw ExperimentToolError.invalidKey("实验 Key 不能为空") }
+        guard !value.isEmpty else { throw ExperimentToolError.invalidKey("配置 Key 不能为空") }
         guard value.utf8.count <= 1_024,
               !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
-            throw ExperimentToolError.invalidKey("实验 Key 包含无效字符或过长")
+            throw ExperimentToolError.invalidKey("配置 Key 包含无效字符或过长")
         }
         return value
     }

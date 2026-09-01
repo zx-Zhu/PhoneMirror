@@ -43,6 +43,14 @@ final class PhoneMirrorTests: XCTestCase {
         )
     }
 
+    func testAndroidSettingsPreferencesParsing() throws {
+        let xml = Data(#"<?xml version='1.0' encoding='utf-8'?><map><string name="bd_location_settings">{&quot;json_key&quot;:{&quot;enabled&quot;:true},&quot;string_key&quot;:&quot;plain&quot;,&quot;number_key&quot;:3}</string></map>"#.utf8)
+        let values = try ADBClient.decodeAndroidSettingsPreferences(xml)
+        XCTAssertEqual(values["json_key"], #"{"enabled":true}"#)
+        XCTAssertEqual(values["string_key"], "plain")
+        XCTAssertEqual(values["number_key"], "3")
+    }
+
     func testHarmonyPackageInfoParsing() {
         let manifest = Data(#"{"app":{"bundleName":"com.example.reader"},"module":{"name":"entry","mainElement":"EntryAbility","abilities":[{"name":"EntryAbility"}]}}"#.utf8)
         XCTAssertEqual(
@@ -617,6 +625,51 @@ final class PhoneMirrorTests: XCTestCase {
         XCTAssertFalse(catalog.summary.isEmpty)
         XCTAssertTrue(catalog.canAdd)
         XCTAssertTrue(catalog.canRemove)
+    }
+
+    func testAndroidSettingsCatalogOnConnectedDevice() async throws {
+        guard let deviceID = ProcessInfo.processInfo.environment["PHONE_MIRROR_ANDROID_SETTINGS_TEST_DEVICE"],
+              !deviceID.isEmpty else {
+            throw XCTSkip("Set PHONE_MIRROR_ANDROID_SETTINGS_TEST_DEVICE to run the read-only Settings test")
+        }
+        let client = ADBClient()
+        let catalog = try await client.loadSettings(packageID: "com.phoenix.read", deviceID: deviceID)
+        XCTAssertFalse(catalog.entries.isEmpty)
+        XCTAssertFalse(catalog.canAdd)
+        XCTAssertTrue(catalog.canRemove)
+        XCTAssertTrue(catalog.entries.allSatisfy { !$0.key.isEmpty })
+    }
+
+    func testAndroidRuntimeSettingsOverrideOnConnectedDevice() async throws {
+        guard let deviceID = ProcessInfo.processInfo.environment["PHONE_MIRROR_ANDROID_SETTINGS_MUTATION_TEST_DEVICE"],
+              !deviceID.isEmpty else {
+            throw XCTSkip("Set PHONE_MIRROR_ANDROID_SETTINGS_MUTATION_TEST_DEVICE to run the transient Settings test")
+        }
+        let client = ADBClient()
+        let catalog = try await client.loadSettings(packageID: "com.phoenix.read", deviceID: deviceID)
+        let entry = try XCTUnwrap(catalog.entries.first(where: { !$0.overridden }))
+        do {
+            _ = try await client.setSetting(
+                packageID: "com.phoenix.read", deviceID: deviceID, key: entry.key,
+                value: entry.value, type: ExperimentValueType.inferred(from: entry.value)
+            )
+            let overridden = try await client.loadSettings(
+                packageID: "com.phoenix.read", deviceID: deviceID
+            )
+            XCTAssertEqual(overridden.entries.first(where: { $0.key == entry.key })?.overridden, true)
+            _ = try await client.clearSetting(
+                packageID: "com.phoenix.read", deviceID: deviceID, key: entry.key
+            )
+            let restored = try await client.loadSettings(
+                packageID: "com.phoenix.read", deviceID: deviceID
+            )
+            XCTAssertEqual(restored.entries.first(where: { $0.key == entry.key })?.overridden, false)
+        } catch {
+            _ = try? await client.clearSetting(
+                packageID: "com.phoenix.read", deviceID: deviceID, key: entry.key
+            )
+            throw error
+        }
     }
 
     func testHarmonyExperimentCatalogOnConnectedDevice() async throws {

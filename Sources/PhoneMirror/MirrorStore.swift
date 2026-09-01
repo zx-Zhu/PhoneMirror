@@ -434,6 +434,16 @@ final class MirrorStore: ObservableObject {
         }
     }
 
+    func loadSettings(packageID: String) async throws -> ExperimentCatalog {
+        guard let device = selectedDevice, device.state.isConnected else {
+            throw ExperimentToolError.unsupported("设备未连接，无法读取 Settings")
+        }
+        guard device.platform == .android else {
+            throw ExperimentToolError.unsupported("Settings 调试当前仅支持 Android")
+        }
+        return try await adbClient.loadSettings(packageID: packageID, deviceID: device.serial)
+    }
+
     func setExperiment(
         packageID: String, key: String, value: String, type: ExperimentValueType,
         restart: Bool, temporary: Bool
@@ -469,6 +479,33 @@ final class MirrorStore: ObservableObject {
         }
         return try await adbClient.removeExperiment(
             packageID: packageID, deviceID: device.serial, key: key, restart: restart
+        )
+    }
+
+    func setSetting(
+        packageID: String, key: String, value: String, type: ExperimentValueType
+    ) async throws -> String {
+        guard let device = selectedDevice, device.state.isConnected else {
+            throw ExperimentToolError.unsupported("设备未连接，无法写入 Settings")
+        }
+        guard device.platform == .android else {
+            throw ExperimentToolError.unsupported("Settings 调试当前仅支持 Android")
+        }
+        return try await adbClient.setSetting(
+            packageID: packageID, deviceID: device.serial, key: key, value: value,
+            type: type
+        )
+    }
+
+    func clearSetting(packageID: String, key: String) async throws -> String {
+        guard let device = selectedDevice, device.state.isConnected else {
+            throw ExperimentToolError.unsupported("设备未连接，无法清除运行时 Settings")
+        }
+        guard device.platform == .android else {
+            throw ExperimentToolError.unsupported("Settings 调试当前仅支持 Android")
+        }
+        return try await adbClient.clearSetting(
+            packageID: packageID, deviceID: device.serial, key: key
         )
     }
 

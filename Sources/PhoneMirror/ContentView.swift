@@ -325,7 +325,7 @@ private struct MirrorControlRail: View {
             ControlButton(symbol: "link", help: "Schema 跳转", enabled: store.canLaunchSchema) {
                 showSchemaLauncher = true
             }
-            ControlButton(symbol: "switch.2", help: "实验覆盖", enabled: store.canEditExperiments) {
+            ControlButton(symbol: "switch.2", help: "实验 / Settings", enabled: store.canEditExperiments) {
                 showExperimentEditor = true
             }
 
@@ -471,10 +471,19 @@ private struct SchemaLauncherView: View {
 }
 
 private struct ExperimentEditorView: View {
+    private enum Mode: String, CaseIterable, Identifiable {
+        case experiments
+        case settings
+
+        var id: String { rawValue }
+        var title: String { self == .experiments ? "实验" : "Settings" }
+    }
+
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: MirrorStore
     @AppStorage("androidExperimentPackage") private var androidPackage = "com.phoenix.read"
     @AppStorage("harmonyExperimentPackage") private var harmonyPackage = "com.dragon.read.next"
+    @State private var mode: Mode = .experiments
     @State private var catalog: ExperimentCatalog?
     @State private var selection: String?
     @State private var search = ""
@@ -493,7 +502,7 @@ private struct ExperimentEditorView: View {
                     .font(.system(size: 30))
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("实验覆盖").font(.title2.bold())
+                    Text("实验 / Settings").font(.title2.bold())
                     Text(platformDescription).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -501,19 +510,27 @@ private struct ExperimentEditorView: View {
             }
 
             HStack(spacing: 8) {
+                Picker("配置类型", selection: $mode) {
+                    ForEach(Mode.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+                .disabled(store.selectedPlatform != .android)
                 TextField("应用包名", text: packageBinding)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(.body, design: .monospaced))
                 Button { load() } label: {
                     if busy && catalog == nil { ProgressView().controlSize(.small) }
-                    else { Label("读取实验", systemImage: "arrow.clockwise") }
+                    else { Label("读取\(mode.title)", systemImage: "arrow.clockwise") }
                 }
                 .disabled(busy || normalizedPackage == nil)
             }
 
             HSplitView {
                 VStack(alignment: .leading, spacing: 8) {
-                    TextField("搜索实验 Key", text: $search)
+                    TextField("搜索\(mode.title) Key", text: $search)
                         .textFieldStyle(.roundedBorder)
                     List(filteredEntries, selection: $selection) { entry in
                         VStack(alignment: .leading, spacing: 3) {
@@ -529,17 +546,17 @@ private struct ExperimentEditorView: View {
                         }
                         .tag(entry.key)
                     }
-                    Text(catalog?.summary ?? "读取后显示实验列表")
+                    Text(catalog?.summary ?? "读取后显示\(mode.title)列表")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(minWidth: 270, idealWidth: 310)
 
                 VStack(alignment: .leading, spacing: 11) {
                     HStack {
-                        TextField("实验 Key", text: $draftKey)
+                        TextField("\(mode.title) Key", text: $draftKey)
                             .textFieldStyle(.roundedBorder)
                             .font(.system(.body, design: .monospaced))
-                            .disabled(store.selectedPlatform == .harmonyOS)
+                            .disabled(store.selectedPlatform == .harmonyOS || mode == .settings)
                         Picker("类型", selection: $valueType) {
                             ForEach(ExperimentValueType.allCases) { Text($0.title).tag($0) }
                         }
@@ -548,7 +565,7 @@ private struct ExperimentEditorView: View {
 
                     ZStack(alignment: .topLeading) {
                         if draftValue.isEmpty {
-                            Text("输入实验值").foregroundStyle(.tertiary).padding(8).allowsHitTesting(false)
+                            Text("输入\(mode.title)值").foregroundStyle(.tertiary).padding(8).allowsHitTesting(false)
                         }
                         TextEditor(text: $draftValue)
                             .font(.system(size: 13, design: .monospaced))
@@ -565,18 +582,21 @@ private struct ExperimentEditorView: View {
                         Text("服务端值：\(server)").lineLimit(2).font(.caption).foregroundStyle(.secondary)
                     }
 
-                    HStack(spacing: 14) {
-                        Toggle("写入后重启 App", isOn: $restart)
-                            .disabled(temporary)
-                        if store.selectedPlatform == .android {
+                    if mode == .experiments {
+                        HStack(spacing: 14) {
+                            Toggle("写入后重启 App", isOn: $restart)
+                                .disabled(temporary)
                             Toggle("仅当前运行", isOn: $temporary)
                                 .onChange(of: temporary) { enabled in if enabled { restart = true } }
+                            Spacer()
                         }
-                        Spacer()
+                        .toggleStyle(.checkbox)
                     }
-                    .toggleStyle(.checkbox)
 
-                    if store.selectedPlatform == .harmonyOS {
+                    if mode == .settings {
+                        Label("仅修改 App 进程内存，不写 MMKV、不重启；退出 App 后自动失效。只展示同时经过 SsConfigMgr 的 Settings。", systemImage: "memorychip")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    } else if store.selectedPlatform == .harmonyOS {
                         Label("通过 App 已有 DevTool/HDP 写入 common_abtest；只允许修改已有实验。重启后服务端刷新仍可能覆盖。", systemImage: "info.circle")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     } else {
@@ -591,8 +611,10 @@ private struct ExperimentEditorView: View {
                     }
 
                     HStack {
-                        Button("恢复快照") { restore() }
-                            .disabled(busy || catalog?.hasBackup != true)
+                        if mode == .experiments {
+                            Button("恢复快照") { restore() }
+                                .disabled(busy || catalog?.hasBackup != true)
+                        }
                         if catalog?.canRemove == true, selectedEntry?.overridden == true {
                             Button("移除覆盖", role: .destructive) { remove() }.disabled(busy)
                         }
@@ -600,7 +622,7 @@ private struct ExperimentEditorView: View {
                         Button("格式化") { formatValue() }.disabled(busy || draftValue.isEmpty)
                         Button { save() } label: {
                             if busy { ProgressView().controlSize(.small).frame(minWidth: 62) }
-                            else { Text("保存实验").frame(minWidth: 62) }
+                            else { Text("保存\(mode.title)").frame(minWidth: 76) }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(busy || draftKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -614,8 +636,12 @@ private struct ExperimentEditorView: View {
         .padding(24)
         .frame(width: 900, height: 610)
         .onAppear { load() }
+        .onChange(of: mode) { _ in resetAndLoad() }
         .onChange(of: selection) { key in select(key) }
-        .onChange(of: store.selectedDeviceID) { _ in catalog = nil; selection = nil; load() }
+        .onChange(of: store.selectedDeviceID) { _ in
+            if store.selectedPlatform != .android { mode = .experiments }
+            resetAndLoad()
+        }
     }
 
     private var packageBinding: Binding<String> {
@@ -647,7 +673,7 @@ private struct ExperimentEditorView: View {
         busy = true; message = nil
         Task {
             do {
-                let result = try await store.loadExperiments(packageID: package)
+                let result = try await loadCatalog(package: package)
                 catalog = result
                 let target = preferredKey.flatMap { key in result.entries.contains(where: { $0.key == key }) ? key : nil }
                     ?? selection.flatMap { key in result.entries.contains(where: { $0.key == key }) ? key : nil }
@@ -668,12 +694,19 @@ private struct ExperimentEditorView: View {
         busy = true; message = nil
         Task {
             do {
-                let result = try await store.setExperiment(
-                    packageID: package, key: key, value: draftValue, type: valueType,
-                    restart: restart, temporary: temporary
-                )
+                let result: String
+                if mode == .settings {
+                    result = try await store.setSetting(
+                        packageID: package, key: key, value: draftValue, type: valueType
+                    )
+                } else {
+                    result = try await store.setExperiment(
+                        packageID: package, key: key, value: draftValue, type: valueType,
+                        restart: restart, temporary: temporary
+                    )
+                }
                 message = (result, false)
-                catalog = try await store.loadExperiments(packageID: package)
+                catalog = try await loadCatalog(package: package)
                 selection = key; select(key)
                 message = (result, false)
             } catch { message = (error.localizedDescription, true) }
@@ -686,9 +719,16 @@ private struct ExperimentEditorView: View {
         busy = true; message = nil
         Task {
             do {
-                let result = try await store.removeExperiment(packageID: package, key: key, restart: restart)
-                catalog = try await store.loadExperiments(packageID: package)
-                selection = catalog?.entries.first?.key; select(selection)
+                let result: String
+                if mode == .settings {
+                    result = try await store.clearSetting(packageID: package, key: key)
+                } else {
+                    result = try await store.removeExperiment(packageID: package, key: key, restart: restart)
+                }
+                catalog = try await loadCatalog(package: package)
+                selection = catalog?.entries.contains(where: { $0.key == key }) == true
+                    ? key : catalog?.entries.first?.key
+                select(selection)
                 message = (result, false)
             } catch { message = (error.localizedDescription, true) }
             busy = false
@@ -701,7 +741,7 @@ private struct ExperimentEditorView: View {
         Task {
             do {
                 let result = try await store.restoreExperimentBackup(packageID: package, restart: restart)
-                catalog = try await store.loadExperiments(packageID: package)
+                catalog = try await loadCatalog(package: package)
                 selection = catalog?.entries.first?.key; select(selection)
                 message = (result, false)
             } catch { message = (error.localizedDescription, true) }
@@ -715,6 +755,21 @@ private struct ExperimentEditorView: View {
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
               let value = String(data: data, encoding: .utf8) else { return }
         draftValue = value
+    }
+
+    private func loadCatalog(package: String) async throws -> ExperimentCatalog {
+        mode == .settings
+            ? try await store.loadSettings(packageID: package)
+            : try await store.loadExperiments(packageID: package)
+    }
+
+    private func resetAndLoad() {
+        catalog = nil
+        selection = nil
+        draftKey = ""
+        draftValue = ""
+        temporary = false
+        load()
     }
 }
 

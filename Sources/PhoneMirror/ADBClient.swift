@@ -15,6 +15,9 @@ actor ADBClient {
     private var recordingProcess: Process?
     private var recordingErrorPipe: Pipe?
     private var clipboardSequence: UInt64 = 0
+    private var runtimeSettingsKeys: [String: Set<String>] = [:]
+    private var runtimeSettingsValues: [String: [String: String]] = [:]
+    private var runtimeSettingsSessions: [String: RuntimeSettingsSession] = [:]
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         executable = Self.findExecutable(environment: environment)
@@ -280,6 +283,98 @@ actor ADBClient {
         return restart ? "已恢复上次快照并重启 App" : "已恢复上次快照，App 当前保持停止"
     }
 
+    func loadSettings(packageID: String, deviceID: String) async throws -> ExperimentCatalog {
+        let package = try Self.validatedPackage(packageID)
+        try await ensureRunAs(package: package, deviceID: deviceID)
+        let processID = try await runningProcessID(package: package, deviceID: deviceID)
+        let cacheKey = Self.runtimeSettingsCacheKey(deviceID: deviceID, package: package)
+        if runtimeSettingsSessions[cacheKey]?.processID != processID {
+            runtimeSettingsSessions.removeValue(forKey: cacheKey)
+            runtimeSettingsKeys.removeValue(forKey: cacheKey)
+            runtimeSettingsValues.removeValue(forKey: cacheKey)
+        } else if let session = runtimeSettingsSessions[cacheKey],
+                  let supportedKeys = runtimeSettingsKeys[cacheKey],
+                  let values = runtimeSettingsValues[cacheKey] {
+            return Self.runtimeSettingsCatalog(
+                values: values, supportedKeys: supportedKeys, overrides: session.overrides
+            )
+        }
+        let values = try await readAndroidSettingsValues(package: package, deviceID: deviceID)
+        let supportedKeys = try await filterRuntimeSettingsKeys(
+            Set(values.keys), package: package, deviceID: deviceID
+        )
+        runtimeSettingsKeys[cacheKey] = supportedKeys
+        runtimeSettingsValues[cacheKey] = values
+        var sessionOverrides = runtimeSettingsSessions[cacheKey]?.overrides ?? [:]
+        sessionOverrides = sessionOverrides.filter { supportedKeys.contains($0.key) }
+        var originals = runtimeSettingsSessions[cacheKey]?.originals ?? [:]
+        originals = originals.filter { supportedKeys.contains($0.key) }
+        runtimeSettingsSessions[cacheKey] = RuntimeSettingsSession(
+            processID: processID, overrides: sessionOverrides, originals: originals
+        )
+        return Self.runtimeSettingsCatalog(
+            values: values, supportedKeys: supportedKeys, overrides: sessionOverrides
+        )
+    }
+
+    func setSetting(
+        packageID: String, deviceID: String, key inputKey: String, value: String,
+        type: ExperimentValueType
+    ) async throws -> String {
+        let package = try Self.validatedPackage(packageID)
+        let key = try ExperimentInput.normalizedKey(inputKey)
+        let validated = try type.validatedText(value)
+        try await ensureRunAs(package: package, deviceID: deviceID)
+        let processID = try await runningProcessID(package: package, deviceID: deviceID)
+        let cacheKey = Self.runtimeSettingsCacheKey(deviceID: deviceID, package: package)
+        if runtimeSettingsSessions[cacheKey]?.processID != processID {
+            runtimeSettingsSessions.removeValue(forKey: cacheKey)
+            runtimeSettingsKeys.removeValue(forKey: cacheKey)
+            runtimeSettingsValues.removeValue(forKey: cacheKey)
+        }
+        if runtimeSettingsKeys[cacheKey]?.contains(key) != true {
+            _ = try await loadSettings(packageID: package, deviceID: deviceID)
+        }
+        guard runtimeSettingsKeys[cacheKey]?.contains(key) == true else {
+            throw ExperimentToolError.unsupported("该配置不经过 SsConfigMgr，无法安全地仅在运行时覆盖")
+        }
+        var session = runtimeSettingsSessions[cacheKey] ?? RuntimeSettingsSession(
+            processID: processID, overrides: [:], originals: [:]
+        )
+        let previous = try await setRuntimeSetting(
+            key: key, value: validated, package: package, deviceID: deviceID
+        )
+        if session.originals[key] == nil {
+            session.originals[key] = RuntimeSettingOriginal(value: previous)
+        }
+        session.overrides[key] = validated
+        runtimeSettingsSessions[cacheKey] = session
+        return "已更新运行时 Settings「\(key)」，退出 App 后自动失效"
+    }
+
+    func clearSetting(packageID: String, deviceID: String, key inputKey: String) async throws -> String {
+        let package = try Self.validatedPackage(packageID)
+        let key = try ExperimentInput.normalizedKey(inputKey)
+        try await ensureRunAs(package: package, deviceID: deviceID)
+        let processID = try await runningProcessID(package: package, deviceID: deviceID)
+        let cacheKey = Self.runtimeSettingsCacheKey(deviceID: deviceID, package: package)
+        guard var session = runtimeSettingsSessions[cacheKey], session.processID == processID,
+              session.overrides[key] != nil else {
+            throw ExperimentToolError.unsupported("该配置不是 PhoneMirror 本次运行添加的覆盖")
+        }
+        if let original = session.originals[key]?.value {
+            _ = try await setRuntimeSetting(
+                key: key, value: original, package: package, deviceID: deviceID
+            )
+        } else {
+            try await clearRuntimeSetting(key: key, package: package, deviceID: deviceID)
+        }
+        session.overrides.removeValue(forKey: key)
+        session.originals.removeValue(forKey: key)
+        runtimeSettingsSessions[cacheKey] = session
+        return "已清除运行时 Settings「\(key)」"
+    }
+
     static func parsePackageInfo(_ output: String) -> AppPackageInfo? {
         guard let identifier = firstCapture(#"package:\s+name='([^']+)'"#, in: output) else { return nil }
         let activity = firstCapture(#"launchable-activity:\s+name='([^']+)'"#, in: output)
@@ -290,6 +385,34 @@ actor ADBClient {
     private static let abOverrideKey = "key_ab_info_local_override_result"
     private static let abCatalogFile = "files/mmkv/id_common_ab_result"
     private static let abCatalogKey = "key_common_ab_result_json"
+    private static let settingsPreferencesFile = "shared_prefs/BDLocationCache.xml"
+
+    private struct RuntimeBridgeResult: Decodable {
+        let success: Bool
+        let message: String
+        let candidateCount: Int?
+        let supportedCount: Int?
+        let supportedBitmapBase64: String?
+        let previousValueBase64: String?
+
+        enum CodingKeys: String, CodingKey {
+            case success, message
+            case candidateCount = "candidate_count"
+            case supportedCount = "supported_count"
+            case supportedBitmapBase64 = "supported_bitmap_base64"
+            case previousValueBase64 = "previous_value_base64"
+        }
+    }
+
+    private struct RuntimeSettingsSession {
+        let processID: String
+        var overrides: [String: String]
+        var originals: [String: RuntimeSettingOriginal]
+    }
+
+    private struct RuntimeSettingOriginal {
+        let value: String?
+    }
 
     private static func validatedPackage(_ input: String) throws -> String {
         guard let package = ExperimentInput.normalizedPackage(input) else { throw ExperimentToolError.invalidPackage }
@@ -319,6 +442,53 @@ actor ADBClient {
             if let item = value as? [String: Any], let actual = item["val"] { return actual }
             return value
         }
+    }
+
+    private func readAndroidSettingsValues(
+        package: String, deviceID: String
+    ) async throws -> [String: String] {
+        let xml = try await runAsRead(
+            Self.settingsPreferencesFile, package: package, deviceID: deviceID
+        )
+        return try Self.decodeAndroidSettingsPreferences(xml)
+    }
+
+    static func decodeAndroidSettingsPreferences(_ xml: Data) throws -> [String: String] {
+        guard let source = String(data: xml, encoding: .utf8),
+              let match = source.range(
+                of: #"<string\s+name=["']bd_location_settings["'][^>]*>([\s\S]*?)</string>"#,
+                options: .regularExpression
+              ) else {
+            throw ExperimentToolError.corruptStorage("未找到 Android Settings 数据")
+        }
+        let element = String(source[match])
+        guard let contentStart = element.firstIndex(of: ">"),
+              let contentEnd = element.range(of: "</string>", options: .backwards)?.lowerBound else {
+            throw ExperimentToolError.corruptStorage("Android Settings XML 格式无效")
+        }
+        let raw = String(element[element.index(after: contentStart)..<contentEnd])
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&apos;", with: "'")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .replacingOccurrences(of: "&amp;", with: "&")
+        guard let data = raw.data(using: .utf8),
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ExperimentToolError.corruptStorage("未找到可解析的 Android Settings 数据")
+        }
+        var result: [String: String] = [:]
+        for (key, value) in object {
+            if let string = value as? String {
+                result[key] = string
+            } else if !(value is NSNull),
+                      let encoded = try? JSONSerialization.data(
+                        withJSONObject: value, options: [.fragmentsAllowed, .sortedKeys]
+                      ),
+                      let string = String(data: encoded, encoding: .utf8) {
+                result[key] = string
+            }
+        }
+        return result
     }
 
     private static func decodeOverrideMap(_ raw: String?) throws -> [String: String] {
@@ -390,6 +560,156 @@ actor ADBClient {
     private func forceStop(package: String, deviceID: String) async throws {
         let result = await execute(deviceID, ["shell", "am", "force-stop", package], timeout: 5)
         guard result.succeeded else { throw ExperimentToolError.command(Self.friendlyError(result)) }
+    }
+
+    private func runningProcessID(package: String, deviceID: String) async throws -> String {
+        let result = await execute(deviceID, ["shell", "pidof", package], timeout: 3)
+        guard result.succeeded, let processID = result.stdout.split(whereSeparator: \.isWhitespace).first else {
+            throw ExperimentToolError.unsupported("请先启动 App；运行时 Settings 不会自动重启应用")
+        }
+        return String(processID)
+    }
+
+    private func setRuntimeSetting(
+        key: String, value: String, package: String, deviceID: String
+    ) async throws -> String? {
+        let response = try await runRuntimeSettingsBridge(
+            operation: "set", triggerKey: key,
+            payload: Data(value.utf8).base64EncodedString(),
+            package: package, deviceID: deviceID, timeout: 15
+        )
+        guard let encoded = response.previousValueBase64 else { return nil }
+        guard let data = Data(base64Encoded: encoded),
+              let previous = String(data: data, encoding: .utf8) else {
+            throw ExperimentToolError.command("运行时 Settings 原值返回格式无效")
+        }
+        return previous
+    }
+
+    private func clearRuntimeSetting(
+        key: String, package: String, deviceID: String
+    ) async throws {
+        _ = try await runRuntimeSettingsBridge(
+            operation: "clear", triggerKey: key, payload: nil,
+            package: package, deviceID: deviceID, timeout: 15
+        )
+    }
+
+    private func filterRuntimeSettingsKeys(
+        _ candidates: Set<String>, package: String, deviceID: String
+    ) async throws -> Set<String> {
+        guard !candidates.isEmpty else { return [] }
+        let sortedCandidates = candidates.sorted()
+        let payload = sortedCandidates.map {
+            Data($0.utf8).base64EncodedString()
+        }.joined(separator: "\n")
+        let response = try await runRuntimeSettingsBridge(
+            operation: "filter", triggerKey: sortedCandidates[0],
+            payload: Data(payload.utf8).base64EncodedString(),
+            package: package, deviceID: deviceID, timeout: 45
+        )
+        guard response.candidateCount == sortedCandidates.count,
+              let supportedCount = response.supportedCount,
+              let encoded = response.supportedBitmapBase64,
+              let bitmap = Data(base64Encoded: encoded),
+              bitmap.count == (sortedCandidates.count + 7) / 8 else {
+            throw ExperimentToolError.command("运行时 Settings 白名单返回格式无效")
+        }
+        let keys = Set(sortedCandidates.enumerated().compactMap { index, key in
+            bitmap[index / 8] & UInt8(1 << (index % 8)) == 0 ? nil : key
+        })
+        guard keys.count == supportedCount else {
+            throw ExperimentToolError.command("运行时 Settings 白名单校验失败")
+        }
+        return keys
+    }
+
+    private func runRuntimeSettingsBridge(
+        operation: String, triggerKey: String, payload: String?,
+        package: String, deviceID: String, timeout: TimeInterval
+    ) async throws -> RuntimeBridgeResult {
+        guard let adb = executable else { throw ExperimentToolError.command("未找到 adb") }
+        guard let java = Self.findJava() else {
+            throw ExperimentToolError.unsupported("未找到 Java 17，无法连接 Android 运行时")
+        }
+        guard let bridge = Self.runtimeSettingsBridge() else {
+            throw ExperimentToolError.unsupported("PhoneMirror 缺少运行时 Settings 组件，请重新构建应用")
+        }
+        let pid = try await runningProcessID(package: package, deviceID: deviceID)
+        let forward = await executeRaw(
+            ["-s", deviceID, "forward", "tcp:0", "jdwp:\(pid)"], timeout: 5
+        )
+        guard forward.succeeded,
+              let port = Int(forward.stdout.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw ExperimentToolError.unsupported(
+                "无法连接 App 调试进程，请确认安装包为 debuggable 且未被其他调试器占用"
+            )
+        }
+        var arguments = ["--add-modules", "jdk.jdi"]
+        if bridge.pathExtension == "java" {
+            arguments.append(contentsOf: [bridge.path, "127.0.0.1", "\(port)"])
+        } else {
+            arguments.append(contentsOf: ["-cp", bridge.path, "RuntimeSettingsBridge", "127.0.0.1", "\(port)"])
+        }
+        arguments.append(contentsOf: [adb.path, deviceID, package, operation, triggerKey])
+        if let payload { arguments.append(payload) }
+        let result = await CommandRunner.run(executable: java, arguments: arguments, timeout: timeout)
+        _ = await executeRaw(
+            ["-s", deviceID, "forward", "--remove", "tcp:\(port)"], timeout: 3
+        )
+        let response = result.stdout.split(whereSeparator: \.isNewline).last.flatMap { line in
+            String(line).data(using: .utf8).flatMap {
+                try? JSONDecoder().decode(RuntimeBridgeResult.self, from: $0)
+            }
+        }
+        guard result.succeeded, let response, response.success else {
+            throw ExperimentToolError.command(
+                response?.message ?? result.stderr.nilIfEmpty ?? "运行时 Settings 调试失败"
+            )
+        }
+        return response
+    }
+
+    private static func runtimeSettingsCacheKey(deviceID: String, package: String) -> String {
+        deviceID + "\u{0}" + package
+    }
+
+    private static func runtimeSettingsCatalog(
+        values: [String: String], supportedKeys: Set<String>, overrides: [String: String]
+    ) -> ExperimentCatalog {
+        let entries = supportedKeys.sorted().compactMap { key -> ExperimentEntry? in
+            guard let value = overrides[key] ?? values[key] else { return nil }
+            return ExperimentEntry(
+                key: key, value: value, serverValue: nil,
+                overridden: overrides[key] != nil, vid: nil
+            )
+        }
+        return ExperimentCatalog(
+            entries: entries,
+            summary: "运行时 Settings \(entries.count) · 退出 App 后自动失效",
+            canAdd: false, canRemove: true, hasBackup: false
+        )
+    }
+
+    private static func findJava() -> URL? {
+        let candidates = [
+            "/usr/bin/java",
+            "/opt/homebrew/opt/openjdk@17/bin/java",
+            "/opt/homebrew/bin/java"
+        ]
+        return candidates.map(URL.init(fileURLWithPath:)).first {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }
+    }
+
+    private static func runtimeSettingsBridge() -> URL? {
+        let bundle = Bundle.main.resourceURL?
+            .appendingPathComponent("runtime-settings-bridge", isDirectory: true)
+        let source = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("tools/RuntimeSettingsBridge.java")
+        return [bundle, source].compactMap { $0 }.first {
+            FileManager.default.fileExists(atPath: $0.path)
+        }
     }
 
     private func launch(package: String, deviceID: String) async throws {

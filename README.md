@@ -110,6 +110,17 @@ Android 安装包通过 `adb install -r` 覆盖安装，并从 APK manifest 读�
 
 PhoneMirror 不尝试访问 HarmonyOS 应用沙箱文件，也不对正式包进行调试器注入。
 
+### Android Settings 调试
+
+Android 设备在“实验 / Settings”面板中可切换到 Settings，搜索并编辑 debug 包中已存在的
+Settings 配置。PhoneMirror 通过 `adb run-as` 只读扫描 App 已有的 Settings 值，并通过 JDWP
+查询当前进程的 `SsConfigMgr` 注册结果；仅展示能经过运行时拦截器的 Settings，不允许新增未知 key。
+
+保存时，PhoneMirror 通过 JDWP 直接修改 `LocalAbOverrideManager` 的进程内覆盖表，不调用
+持久化接口、不写 MMKV，也不会重启 App。修改会立即作用于后续读取，App 进程退出后自动
+失效；“移除覆盖”也只清除当前进程内的值。该能力要求 App 已启动、安装包为 debuggable，
+且本地配置拦截能力已启用。运行时通道不可用时会直接报错，不会回退为磁盘写入。
+
 ## 隐私
 
 PhoneMirror 不连接云服务，不上传画面，不采集遥测。应用只执行设备发现、屏幕截图和用户主动触发的输入命令。
