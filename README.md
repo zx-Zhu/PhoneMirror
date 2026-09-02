@@ -12,6 +12,7 @@
 - Android 使用 scrcpy 实时触控；HarmonyOS 使用 UiTest RPC 实时发送 DOWN/MOVE/UP，连接失败时自动回退稳定的 click/swipe
 - Android 与 HarmonyOS 支持返回、主页、多任务和电源等快捷操作
 - Android 与 HarmonyOS 支持输入完整 Schema / URL 并跳转到对应应用页面
+- Android 与 HarmonyOS 支持输入并执行自定义 ADB / HDC 设备指令，查看 stdout、stderr 和退出码
 - Android 与 HarmonyOS 支持从 Mac 读取和覆盖调试包实验值，无需修改业务仓源码
 - 将 `.apk` 或 `.hap` 拖到对应设备的投屏画面，可覆盖安装并自动启动应用
 - 两种平台均使用手机系统录屏，不依赖投屏画面
@@ -73,6 +74,7 @@ PHONE_MIRROR_HARMONY_TEST_DEVICE=鸿蒙设备ID PHONE_MIRROR_ANDROID_TEST_DEVICE
 | 中键（Android / HarmonyOS） | Home |
 | 输入文字（Android / HarmonyOS） | 输入到当前焦点 |
 | 右侧链接按钮（Android / HarmonyOS） | 输入 Schema / URL 并跳转 |
+| 顶部“指令”按钮（Android / HarmonyOS） | 输入自定义 ADB / HDC 指令并查看结果 |
 | 右侧实验按钮（Android / HarmonyOS） | 读取、搜索、编辑实验值并按需重启 App |
 | 拖入 `.apk`（Android） | 覆盖安装并启动应用 |
 | 拖入 `.hap`（HarmonyOS） | 覆盖安装并启动应用 |
@@ -109,6 +111,16 @@ Android 安装包通过 `adb install -r` 覆盖安装，并从 APK manifest 读�
   覆盖本地值；Android 的“仅当前运行”会在 App 加载覆盖后恢复磁盘值，下次冷启动自动失效。
 
 PhoneMirror 不尝试访问 HarmonyOS 应用沙箱文件，也不对正式包进行调试器注入。
+
+### 自定义设备指令
+
+设备指令面板支持粘贴完整的 `adb ...` / `hdc ...` 命令，也支持直接输入 `shell ...`、
+`install ...` 等子命令。PhoneMirror 会去掉可选的工具名前缀，并自动追加当前设备的
+`adb -s <serial>` 或 `hdc -t <target>`，避免误发到其他已连接设备。
+
+指令通过进程参数直接交给 ADB/HDC，不经过 Mac 本机 shell，因此输入中的 `;`、管道和
+重定向不会在 Mac 上执行。如需设备侧管道，可显式使用 `shell sh -c '命令'`。面板为非交互式
+执行，提供 10、30、60 秒超时选项，并展示 stdout、stderr、退出码与耗时。
 
 ### Android Settings 调试
 

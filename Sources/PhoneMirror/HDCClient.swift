@@ -102,6 +102,23 @@ actor HDCClient {
         }
     }
 
+    func runCustomCommand(
+        arguments: [String], deviceID: String, timeout: TimeInterval
+    ) async -> CommandResult {
+        guard let executable else {
+            return CommandResult(status: -1, stdout: "", stderr: "未找到 hdc", timedOut: false)
+        }
+        return await CommandRunner.run(
+            executable: executable,
+            arguments: Self.customCommandArguments(arguments, deviceID: deviceID),
+            timeout: timeout
+        )
+    }
+
+    static func customCommandArguments(_ arguments: [String], deviceID: String) -> [String] {
+        ["-t", deviceID] + arguments
+    }
+
     static func schemaLaunchArguments(_ schema: String) -> [String] {
         ["shell", "aa", "start", "-U", SchemaLink.shellQuoted(schema)]
     }

@@ -105,6 +105,7 @@ final class MirrorStore: ObservableObject {
         return device.state.isConnected && device.platform != .ios
     }
     var canEditExperiments: Bool { canLaunchSchema }
+    var canRunDeviceCommand: Bool { canLaunchSchema }
 
     var recordingTimeLabel: String {
         let seconds = max(0, Int(recordingElapsed.rounded(.down)))
@@ -418,6 +419,36 @@ final class MirrorStore: ObservableObject {
         } catch {
             return .failed(error.localizedDescription)
         }
+    }
+
+    func runDeviceCommand(
+        _ input: String, timeout: TimeInterval = 30
+    ) async throws -> DeviceCommandExecution {
+        guard let device = selectedDevice, device.state.isConnected else {
+            throw DeviceCommandError.malformed("设备未连接")
+        }
+        let request = try DeviceCommandRequest.parse(input, platform: device.platform)
+        let startedAt = Date()
+        let result: CommandResult
+        switch device.platform {
+        case .android:
+            result = await adbClient.runCustomCommand(
+                arguments: request.arguments, deviceID: device.serial, timeout: timeout
+            )
+        case .harmonyOS:
+            result = await client.runCustomCommand(
+                arguments: request.arguments, deviceID: device.serial, timeout: timeout
+            )
+        case .ios:
+            throw DeviceCommandError.unsupportedPlatform
+        }
+        return DeviceCommandExecution(
+            commandLine: DeviceCommandRequest.displayCommand(
+                platform: device.platform, deviceID: device.serial, arguments: request.arguments
+            ),
+            status: result.status, stdout: result.stdout, stderr: result.stderr,
+            timedOut: result.timedOut, duration: Date().timeIntervalSince(startedAt)
+        )
     }
 
     func loadExperiments(packageID: String) async throws -> ExperimentCatalog {

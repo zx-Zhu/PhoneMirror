@@ -167,6 +167,16 @@ actor ADBClient {
         }
     }
 
+    func runCustomCommand(
+        arguments: [String], deviceID: String, timeout: TimeInterval
+    ) async -> CommandResult {
+        await executeRaw(Self.customCommandArguments(arguments, deviceID: deviceID), timeout: timeout)
+    }
+
+    static func customCommandArguments(_ arguments: [String], deviceID: String) -> [String] {
+        ["-s", deviceID] + arguments
+    }
+
     static func schemaLaunchArguments(_ schema: String) -> [String] {
         ["shell", "am", "start", "-W", "-a", "android.intent.action.VIEW", "-d", SchemaLink.shellQuoted(schema)]
     }

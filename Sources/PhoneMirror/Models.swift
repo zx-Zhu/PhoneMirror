@@ -136,6 +136,155 @@ enum SchemaLaunchResult: Equatable {
     case failed(String)
 }
 
+struct DeviceCommandRequest: Equatable, Sendable {
+    let arguments: [String]
+
+    static func parse(_ input: String, platform: DevicePlatform) throws -> DeviceCommandRequest {
+        guard platform == .android || platform == .harmonyOS else {
+            throw DeviceCommandError.unsupportedPlatform
+        }
+        guard input.utf8.count <= 16_384 else { throw DeviceCommandError.tooLong }
+        var tokens = try tokenize(input)
+        guard !tokens.isEmpty else { throw DeviceCommandError.empty }
+
+        let first = URL(fileURLWithPath: tokens[0]).lastPathComponent.lowercased()
+        let suppliedTool: DevicePlatform?
+        switch first {
+        case "adb", "adb.exe": suppliedTool = .android
+        case "hdc", "hdc.exe": suppliedTool = .harmonyOS
+        default: suppliedTool = nil
+        }
+        if let suppliedTool {
+            guard suppliedTool == platform else {
+                throw DeviceCommandError.wrongTool(expected: platform == .android ? "adb" : "hdc")
+            }
+            tokens.removeFirst()
+        }
+        let selector = platform == .android ? "-s" : "-t"
+        if tokens.first == selector {
+            guard tokens.count >= 3 else {
+                throw DeviceCommandError.malformed("\(selector) 后缺少设备 ID 或子命令")
+            }
+            tokens.removeFirst(2)
+        }
+        guard !tokens.isEmpty else { throw DeviceCommandError.empty }
+        guard tokens.count <= 256, tokens.allSatisfy({ $0.utf8.count <= 8_192 }) else {
+            throw DeviceCommandError.tooLong
+        }
+        if tokens[0].hasPrefix("-") {
+            throw DeviceCommandError.globalOption
+        }
+        return DeviceCommandRequest(arguments: tokens)
+    }
+
+    static func displayCommand(
+        platform: DevicePlatform, deviceID: String, arguments: [String]
+    ) -> String {
+        let tool = platform == .android ? "adb" : "hdc"
+        let selector = platform == .android ? "-s" : "-t"
+        return ([tool, selector, quoted(deviceID)] + arguments.map(quoted)).joined(separator: " ")
+    }
+
+    private static func tokenize(_ input: String) throws -> [String] {
+        guard !input.unicodeScalars.contains(where: { $0.value == 0 }) else {
+            throw DeviceCommandError.malformed("指令不能包含空字符")
+        }
+        var tokens: [String] = []
+        var current = ""
+        var quote: Character?
+        var escaping = false
+        var tokenStarted = false
+
+        for character in input {
+            if escaping {
+                current.append(character)
+                tokenStarted = true
+                escaping = false
+                continue
+            }
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                } else if activeQuote == "\"" && character == "\\" {
+                    escaping = true
+                } else {
+                    current.append(character)
+                }
+                tokenStarted = true
+                continue
+            }
+            if character == "'" || character == "\"" {
+                quote = character
+                tokenStarted = true
+            } else if character == "\\" {
+                escaping = true
+                tokenStarted = true
+            } else if character.unicodeScalars.allSatisfy(CharacterSet.whitespacesAndNewlines.contains) {
+                if tokenStarted {
+                    tokens.append(current)
+                    current = ""
+                    tokenStarted = false
+                }
+            } else {
+                current.append(character)
+                tokenStarted = true
+            }
+        }
+        guard quote == nil else { throw DeviceCommandError.malformed("引号没有闭合") }
+        guard !escaping else { throw DeviceCommandError.malformed("末尾转义符不完整") }
+        if tokenStarted { tokens.append(current) }
+        return tokens
+    }
+
+    private static func quoted(_ value: String) -> String {
+        guard !value.isEmpty else { return "''" }
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_./:=+,-"))
+        if value.unicodeScalars.allSatisfy(safe.contains) { return value }
+        return "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+}
+
+enum DeviceCommandError: LocalizedError, Equatable {
+    case empty
+    case unsupportedPlatform
+    case wrongTool(expected: String)
+    case globalOption
+    case tooLong
+    case malformed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .empty: return "请输入 ADB/HDC 设备子命令"
+        case .unsupportedPlatform: return "自定义设备指令当前仅支持 Android 和 HarmonyOS"
+        case .wrongTool(let expected): return "当前设备应使用 \(expected) 指令"
+        case .globalOption: return "不支持该全局参数；PhoneMirror 会自动绑定当前设备"
+        case .tooLong: return "指令过长，请缩短后重试"
+        case .malformed(let message): return "指令格式错误：\(message)"
+        }
+    }
+}
+
+struct DeviceCommandExecution: Equatable, Sendable {
+    let commandLine: String
+    let status: Int32
+    let stdout: String
+    let stderr: String
+    let timedOut: Bool
+    let duration: TimeInterval
+
+    var succeeded: Bool { status == 0 && !timedOut }
+
+    var transcript: String {
+        var sections = ["$ \(commandLine)"]
+        if !stdout.isEmpty { sections.append(stdout.trimmingCharacters(in: .newlines)) }
+        if !stderr.isEmpty { sections.append("[stderr]\n" + stderr.trimmingCharacters(in: .newlines)) }
+        if stdout.isEmpty && stderr.isEmpty { sections.append("（无输出）") }
+        let state = timedOut ? "timeout" : "exit \(status)"
+        sections.append(String(format: "[%@ · %.2fs]", state, duration))
+        return sections.joined(separator: "\n\n")
+    }
+}
+
 enum PackageInstallState: Equatable {
     case idle
     case installing(String)

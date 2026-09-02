@@ -7,6 +7,7 @@ struct ContentView: View {
     @State private var showHelp = false
     @State private var showSchemaLauncher = false
     @State private var showExperimentEditor = false
+    @State private var showDeviceCommand = false
 
     var body: some View {
         HSplitView {
@@ -27,6 +28,9 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showExperimentEditor) {
             ExperimentEditorView(store: store)
+        }
+        .sheet(isPresented: $showDeviceCommand) {
+            DeviceCommandView(store: store)
         }
         .onChange(of: store.alwaysOnTop) { value in
             NSApp.keyWindow?.level = value ? .floating : .normal
@@ -203,6 +207,14 @@ struct ContentView: View {
                 .frame(width: 92)
             }
 
+            Button { showDeviceCommand = true } label: {
+                Label("指令", systemImage: "terminal")
+                    .frame(height: 30)
+            }
+            .buttonStyle(.borderless)
+            .disabled(!store.canRunDeviceCommand)
+            .help("自定义 ADB / HDC 指令")
+
             Button { showHelp = true } label: {
                 Label("帮助", systemImage: "questionmark.circle")
                     .frame(height: 30)
@@ -356,6 +368,202 @@ private struct MirrorControlRail: View {
                 .stroke(.white.opacity(0.12), lineWidth: 1)
         }
         .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
+private struct DeviceCommandView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var store: MirrorStore
+    @State private var command = ""
+    @State private var timeout = 30
+    @State private var running = false
+    @State private var execution: DeviceCommandExecution?
+    @State private var errorMessage: String?
+    @FocusState private var inputFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 30))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("设备指令").font(.title2.bold())
+                    Text(deviceDescription).foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("ADB / HDC 指令").font(.headline)
+                    Spacer()
+                    Picker("超时", selection: $timeout) {
+                        Text("10 秒").tag(10)
+                        Text("30 秒").tag(30)
+                        Text("60 秒").tag(60)
+                    }
+                    .labelsHidden()
+                    .frame(width: 92)
+                }
+                ZStack(alignment: .topLeading) {
+                    if command.isEmpty {
+                        Text(commandPlaceholder)
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 8)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $command)
+                        .font(.system(size: 13, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .padding(2)
+                        .focused($inputFocused)
+                }
+                .frame(minHeight: 105)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+                Text("可粘贴完整命令或只输入子命令；PhoneMirror 会自动绑定当前设备。不会调用 Mac shell。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            GroupBox("实际执行") {
+                Text(commandPreview)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(previewError == nil ? Color.secondary : Color.orange)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 3)
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("输出").font(.headline)
+                    Spacer()
+                    if execution != nil {
+                        Button("复制输出") { copyOutput() }
+                            .buttonStyle(.borderless)
+                    }
+                }
+                ScrollView([.horizontal, .vertical]) {
+                    Text(outputText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(outputColor)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(9)
+                }
+                .frame(minHeight: 220)
+                .background(Color(nsColor: .textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                }
+            }
+
+            HStack {
+                Text("非交互式执行；持续日志等命令会在所选超时时间后结束。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("清空") { command = ""; execution = nil; errorMessage = nil }
+                    .disabled(running || (command.isEmpty && execution == nil && errorMessage == nil))
+                Button("关闭") { dismiss() }
+                Button { execute() } label: {
+                    if running {
+                        ProgressView().controlSize(.small).frame(minWidth: 58)
+                    } else {
+                        Text("执行").frame(minWidth: 58)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(running || previewError != nil || !store.canRunDeviceCommand)
+            }
+        }
+        .padding(24)
+        .frame(width: 760, height: 650)
+        .onAppear { inputFocused = true }
+        .onChange(of: command) { _ in errorMessage = nil }
+        .onChange(of: store.selectedDeviceID) { _ in execution = nil; errorMessage = nil }
+    }
+
+    private var deviceDescription: String {
+        guard let platform = store.selectedPlatform, let device = store.selectedDevice else {
+            return "未选择设备"
+        }
+        return "\(store.details.model) · \(platform.title) · \(device.shortID)"
+    }
+
+    private var commandPlaceholder: String {
+        store.selectedPlatform == .harmonyOS
+            ? "例如：hdc shell param get const.product.model"
+            : "例如：adb shell getprop ro.product.model"
+    }
+
+    private var parsedRequest: Result<DeviceCommandRequest, Error> {
+        guard let platform = store.selectedPlatform else {
+            return .failure(DeviceCommandError.malformed("未选择设备"))
+        }
+        return Result { try DeviceCommandRequest.parse(command, platform: platform) }
+    }
+
+    private var previewError: String? {
+        if case .failure(let error) = parsedRequest { return error.localizedDescription }
+        return nil
+    }
+
+    private var commandPreview: String {
+        guard let platform = store.selectedPlatform, let device = store.selectedDevice else {
+            return "未选择设备"
+        }
+        switch parsedRequest {
+        case .success(let request):
+            return DeviceCommandRequest.displayCommand(
+                platform: platform, deviceID: device.serial, arguments: request.arguments
+            )
+        case .failure(let error):
+            return error.localizedDescription
+        }
+    }
+
+    private var outputText: String {
+        if let errorMessage { return errorMessage }
+        if let execution { return execution.transcript }
+        return "执行后将在这里显示 stdout、stderr、退出码和耗时。"
+    }
+
+    private var outputColor: Color {
+        if errorMessage != nil || execution?.succeeded == false { return .orange }
+        return execution == nil ? .secondary : .primary
+    }
+
+    private func execute() {
+        guard !running, previewError == nil else { return }
+        running = true
+        execution = nil
+        errorMessage = nil
+        let input = command
+        let commandTimeout = TimeInterval(timeout)
+        Task {
+            do {
+                execution = try await store.runDeviceCommand(input, timeout: commandTimeout)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            running = false
+        }
+    }
+
+    private func copyOutput() {
+        guard let execution else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(execution.transcript, forType: .string)
     }
 }
 

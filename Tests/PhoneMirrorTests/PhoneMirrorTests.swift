@@ -85,6 +85,96 @@ final class PhoneMirrorTests: XCTestCase {
         )
     }
 
+    func testDeviceCommandParsingAndDeviceBinding() throws {
+        XCTAssertEqual(
+            try DeviceCommandRequest.parse(
+                #"adb shell am start -a android.intent.action.VIEW -d "reader://book?id=42&from=debug""#,
+                platform: .android
+            ).arguments,
+            ["shell", "am", "start", "-a", "android.intent.action.VIEW", "-d",
+             "reader://book?id=42&from=debug"]
+        )
+        XCTAssertEqual(
+            ADBClient.customCommandArguments(["shell", "getprop", "ro.product.model"], deviceID: "device-1"),
+            ["-s", "device-1", "shell", "getprop", "ro.product.model"]
+        )
+        XCTAssertEqual(
+            HDCClient.customCommandArguments(["shell", "param", "get", "const.product.model"], deviceID: "device-2"),
+            ["-t", "device-2", "shell", "param", "get", "const.product.model"]
+        )
+        XCTAssertEqual(
+            try DeviceCommandRequest.parse(
+                "adb -s another-device shell getprop ro.product.model", platform: .android
+            ).arguments,
+            ["shell", "getprop", "ro.product.model"]
+        )
+    }
+
+    func testDeviceCommandParsingPreservesQuotedAndEscapedArguments() throws {
+        XCTAssertEqual(
+            try DeviceCommandRequest.parse(
+                #"shell sh -c 'ps -A | grep phoenix' "" hello\ world"#, platform: .android
+            ).arguments,
+            ["shell", "sh", "-c", "ps -A | grep phoenix", "", "hello world"]
+        )
+    }
+
+    func testDeviceCommandParsingRejectsWrongToolAndGlobalOptions() {
+        XCTAssertThrowsError(try DeviceCommandRequest.parse("hdc shell echo ok", platform: .android))
+        XCTAssertThrowsError(try DeviceCommandRequest.parse("adb -d shell id", platform: .android))
+        XCTAssertThrowsError(try DeviceCommandRequest.parse("adb -s only-device", platform: .android))
+        XCTAssertThrowsError(try DeviceCommandRequest.parse("adb shell 'unterminated", platform: .android))
+        XCTAssertThrowsError(try DeviceCommandRequest.parse("", platform: .android))
+        XCTAssertThrowsError(try DeviceCommandRequest.parse("adb shell id", platform: .ios))
+    }
+
+    func testDeviceCommandTranscriptIncludesStreamsAndExitState() {
+        let execution = DeviceCommandExecution(
+            commandLine: "adb -s device shell id", status: 1, stdout: "uid=2000\n",
+            stderr: "permission denied\n", timedOut: false, duration: 0.25
+        )
+        XCTAssertFalse(execution.succeeded)
+        XCTAssertTrue(execution.transcript.contains("uid=2000"))
+        XCTAssertTrue(execution.transcript.contains("[stderr]"))
+        XCTAssertTrue(execution.transcript.contains("exit 1"))
+    }
+
+    func testCommandRunnerDrainsOutputLargerThanPipeBuffer() async {
+        let result = await CommandRunner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/jot"),
+            arguments: ["100000"], timeout: 5
+        )
+        XCTAssertTrue(result.succeeded, result.combinedOutput)
+        XCTAssertTrue(result.stdout.hasPrefix("1\n2\n3\n"))
+        XCTAssertTrue(result.stdout.contains("100000"))
+    }
+
+    func testCustomADBCommandOnConnectedDevice() async throws {
+        guard let deviceID = ProcessInfo.processInfo.environment["PHONE_MIRROR_ANDROID_COMMAND_TEST_DEVICE"],
+              !deviceID.isEmpty else {
+            throw XCTSkip("Set PHONE_MIRROR_ANDROID_COMMAND_TEST_DEVICE to run the read-only ADB command test")
+        }
+        let result = await ADBClient().runCustomCommand(
+            arguments: ["shell", "getprop", "ro.product.model"],
+            deviceID: deviceID, timeout: 5
+        )
+        XCTAssertTrue(result.succeeded, result.combinedOutput)
+        XCTAssertFalse(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    func testCustomHDCCommandOnConnectedDevice() async throws {
+        guard let deviceID = ProcessInfo.processInfo.environment["PHONE_MIRROR_HARMONY_COMMAND_TEST_DEVICE"],
+              !deviceID.isEmpty else {
+            throw XCTSkip("Set PHONE_MIRROR_HARMONY_COMMAND_TEST_DEVICE to run the read-only HDC command test")
+        }
+        let result = await HDCClient().runCustomCommand(
+            arguments: ["shell", "param", "get", "const.product.model"],
+            deviceID: deviceID, timeout: 5
+        )
+        XCTAssertTrue(result.succeeded, result.combinedOutput)
+        XCTAssertFalse(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
     func testExperimentInputValidationAndTypeInference() throws {
         XCTAssertEqual(ExperimentInput.normalizedPackage(" com.phoenix.read "), "com.phoenix.read")
         XCTAssertNil(ExperimentInput.normalizedPackage("com.phoenix.read;rm"))

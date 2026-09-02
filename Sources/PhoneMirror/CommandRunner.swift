@@ -32,6 +32,8 @@ enum CommandRunner {
             } catch {
                 return CommandResult(status: -1, stdout: "", stderr: error.localizedDescription, timedOut: false)
             }
+            let outputReader = CommandPipeReader(stdoutPipe.fileHandleForReading)
+            let errorReader = CommandPipeReader(stderrPipe.fileHandleForReading)
 
             let deadline = Date().addingTimeInterval(timeout)
             while process.isRunning && Date() < deadline {
@@ -49,12 +51,12 @@ enum CommandRunner {
             }
             process.waitUntilExit()
 
-            let output = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let error = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let output = outputReader.wait()
+            let error = errorReader.wait()
             return CommandResult(
                 status: process.terminationStatus,
-                stdout: String(data: output, encoding: .utf8) ?? "",
-                stderr: String(data: error, encoding: .utf8) ?? "",
+                stdout: String(decoding: output, as: UTF8.self),
+                stderr: String(decoding: error, as: UTF8.self),
                 timedOut: didTimeOut
             )
         }.value
@@ -62,5 +64,34 @@ enum CommandRunner {
 
     private static func briefSleep(_ interval: TimeInterval) {
         Thread.sleep(forTimeInterval: interval)
+    }
+}
+
+private final class CommandPipeReader: @unchecked Sendable {
+    private static let byteLimit = 8 * 1_024 * 1_024
+    private static let truncatedMarker = Data("\n[PhoneMirror：输出已截断]\n".utf8)
+    private let group = DispatchGroup()
+    private var data = Data()
+
+    init(_ handle: FileHandle) {
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            while let chunk = try? handle.read(upToCount: 65_536), !chunk.isEmpty {
+                let remaining = Self.byteLimit - data.count
+                if remaining > 0 { data.append(chunk.prefix(remaining)) }
+                if chunk.count > remaining {
+                    data.append(Self.truncatedMarker)
+                    while let discarded = try? handle.read(upToCount: 65_536),
+                          !discarded.isEmpty {}
+                    break
+                }
+            }
+            group.leave()
+        }
+    }
+
+    func wait() -> Data {
+        group.wait()
+        return data
     }
 }
